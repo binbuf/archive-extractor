@@ -43,8 +43,9 @@ constexpr UINT_PTR kShowTimerId = 1;
 const wchar_t* kClassName = L"ae.ExtractionProgressDialog";
 
 // Logical (DPI-unscaled) dialog metrics; scaled per-monitor at create time.
+// The window height is derived from the content (see CenterAndSize) so the
+// bottom margin always matches the top, whatever the caption/frame size.
 constexpr int kDlgWidthDip = 420;
-constexpr int kDlgHeightDip = 110;
 constexpr int kMarginDip = 16;
 constexpr int kLabelHeightDip = 20;
 constexpr int kBarHeightDip = 22;
@@ -156,7 +157,20 @@ void SetLabel(DialogState* st) {
 void CenterAndSize(DialogState* st) {
     const UINT dpi = st->dpi;
     const int w = Scale(kDlgWidthDip, dpi);
-    const int h = Scale(kDlgHeightDip, dpi);
+
+    // Required client height: the same metrics LayoutChildren lays out, plus an
+    // equal top and bottom margin. Grow it by the non-client (caption + frame)
+    // extent for this DPI to get the total window height — this is what keeps a
+    // small margin below the bar/button instead of letting them overflow.
+    const int barRowH =
+        kBarHeightDip > kBtnHeightDip ? kBarHeightDip : kBtnHeightDip;
+    const int clientH = Scale(
+        kMarginDip + kLabelHeightDip + kGapDip + barRowH + kMarginDip, dpi);
+    RECT nc{0, 0, 0, clientH};
+    AdjustWindowRectExForDpi(&nc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE,
+                             WS_EX_DLGMODALFRAME | WS_EX_APPWINDOW, dpi);
+    const int h = nc.bottom - nc.top;
+
     const RECT work = ActiveMonitorRect();
     const int x = work.left + ((work.right - work.left) - w) / 2;
     const int y = work.top + ((work.bottom - work.top) - h) / 2;
