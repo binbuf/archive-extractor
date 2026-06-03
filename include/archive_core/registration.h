@@ -117,9 +117,12 @@ RegResult Unregister();
 // confirmation via the OS "Open with" dialog. This is the documented trigger
 // the front end wires to a first-run / menu action.
 //
-// Shows the shell's Open-With dialog for `filePath` (SHOpenWithDialog). Returns
-// true if the dialog was shown. Does NOT require elevation (it is a per-user
-// choice). No-op-safe; intended as a one-confirmation path, not silent.
+// Shows the shell's Open-With dialog for `filePath` (SHOpenWithDialog) and
+// registers the user's choice as the default handler for that file type WITHOUT
+// re-opening the file. Returns true if the dialog was shown. Does NOT require
+// elevation (it is a per-user choice). No-op-safe; intended as a one-confirmation
+// path, not silent. Wired to the explicit `--set-default` CLI verb — the front
+// end never offers this unprompted (a quick-extract tool shouldn't nag).
 bool PromptSetAsDefault(std::wstring_view filePath);
 
 }  // namespace ae

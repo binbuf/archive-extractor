@@ -234,7 +234,10 @@ bool PromptSetAsDefault(std::wstring_view filePath) {
     const std::wstring path(filePath);
     info.pcszFile = path.c_str();
     info.pcszClass = nullptr;
-    info.oaifInFlags = OAIF_EXEC | OAIF_REGISTER_EXT;
+    // Register the chosen app as the default for this extension, but do NOT
+    // re-open the file (no OAIF_EXEC): --set-default is given a sample file only
+    // to identify the type, so extracting it as a side effect would surprise.
+    info.oaifInFlags = OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT;
     const HRESULT hr = SHOpenWithDialog(nullptr, &info);
     if (FAILED(hr)) {
         ae::Log(std::format(L"[default] SHOpenWithDialog hr=0x{:08x}",
