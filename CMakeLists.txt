@@ -45,6 +45,7 @@ add_library(archive_core STATIC
   src/core/logging.cpp
   src/core/detect.cpp
   src/core/extract.cpp
+  src/core/sevenzip.cpp
   src/core/layout.cpp
   src/core/retry.cpp
   src/core/error_model.cpp
@@ -61,7 +62,42 @@ target_compile_features(archive_core PUBLIC cxx_std_20)
 # advapi32: registry (RegCreateKeyEx/RegSetValueEx/RegDeleteTree) + token
 #   elevation check (OpenProcessToken/GetTokenInformation) in registration.cpp.
 find_package(LibArchive REQUIRED)
-target_link_libraries(archive_core PRIVATE LibArchive::LibArchive ole32 shell32 advapi32)
+# bit7z (task 09): static wrapper over the runtime 7z.dll. Provides the
+# SevenZipExtractor backend for encrypted-7z and all RAR/RAR5 + their
+# multi-volume chains. The vcpkg port exports unofficial::bit7z::bit7z64; it
+# transitively pulls in 7zip::7zip (the static 7-zip SDK glue) and oleaut32.
+find_package(unofficial-bit7z CONFIG REQUIRED)
+target_link_libraries(archive_core PRIVATE LibArchive::LibArchive
+  unofficial::bit7z::bit7z64 ole32 shell32 advapi32)
+
+# ---------------------------------------------------------------------------
+# Runtime 7z.dll. bit7z is a static wrapper that LoadLibrary's 7z.dll on demand
+# (the first time SevenZipExtractor runs), so the DLL must sit next to whatever
+# exe loads it. The vcpkg 7zip port is static-only (no DLL shipped), so we
+# source 7z.dll from the local 7-Zip install (matched to the bit7z-built 7zip
+# 24.09 SDK; 24.0x DLLs are ABI-compatible with bit7z 4.x). In task 13 this same
+# DLL goes into the MSI payload.
+#
+# AE_7ZDLL is resolved at configure time; copied next to both the app exe and
+# the test exe via a POST_BUILD step (see targets below).
+set(_ae_7zdll_candidates
+  "$ENV{ProgramFiles}/7-Zip/7z.dll"
+  "$ENV{ProgramW6432}/7-Zip/7z.dll"
+  "C:/Program Files/7-Zip/7z.dll")
+set(AE_7ZDLL "")
+foreach(_cand IN LISTS _ae_7zdll_candidates)
+  if(EXISTS "${_cand}")
+    set(AE_7ZDLL "${_cand}")
+    break()
+  endif()
+endforeach()
+if(AE_7ZDLL STREQUAL "")
+  message(WARNING
+    "7z.dll not found; the 7z.dll-backed (bit7z) extraction paths and tests "
+    "will fail at runtime. Install 7-Zip or set AE_7ZDLL.")
+else()
+  message(STATUS "Using runtime 7z.dll: ${AE_7ZDLL}")
+endif()
 
 # ---------------------------------------------------------------------------
 # ArchiveExtractor.exe — Win32 GUI-subsystem front end.
@@ -82,6 +118,14 @@ target_link_libraries(ArchiveExtractor PRIVATE
 # wWinMain (wide entry) requires the wide CRT startup under /SUBSYSTEM:WINDOWS.
 target_link_options(ArchiveExtractor PRIVATE /ENTRY:wWinMainCRTStartup)
 
+# Ship 7z.dll next to the app exe (bit7z loads it on demand at runtime).
+if(NOT AE_7ZDLL STREQUAL "")
+  add_custom_command(TARGET ArchiveExtractor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${AE_7ZDLL}" "$<TARGET_FILE_DIR:ArchiveExtractor>/7z.dll"
+    COMMENT "Copying 7z.dll next to ArchiveExtractor.exe")
+endif()
+
 # ---------------------------------------------------------------------------
 # Unit tests (GoogleTest via vcpkg, wired into CTest).
 # ---------------------------------------------------------------------------
@@ -91,6 +135,7 @@ add_executable(archive_core_tests
   tests/test_paths.cpp
   tests/test_detect.cpp
   tests/test_extract.cpp
+  tests/test_sevenzip.cpp
   tests/test_layout.cpp
   tests/test_error_model.cpp
   tests/test_registration.cpp
@@ -100,6 +145,14 @@ target_link_libraries(archive_core_tests PRIVATE archive_core GTest::gtest GTest
 # read leading bytes of these via an absolute path baked in at configure time.
 target_compile_definitions(archive_core_tests PRIVATE
   AE_TEST_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets")
+
+# The 7z.dll-backed tests need 7z.dll next to the test exe too.
+if(NOT AE_7ZDLL STREQUAL "")
+  add_custom_command(TARGET archive_core_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${AE_7ZDLL}" "$<TARGET_FILE_DIR:archive_core_tests>/7z.dll"
+    COMMENT "Copying 7z.dll next to archive_core_tests.exe")
+endif()
 
 include(GoogleTest)
 gtest_discover_tests(archive_core_tests)

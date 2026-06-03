@@ -116,6 +116,48 @@ class LibarchiveExtractor final : public IExtractor {
                                    const ExtractCallbacks& callbacks) override;
 };
 
+// The bit7z/7z.dll-backed implementation (task 09). Covers the cases libarchive
+// cannot: encrypted 7z (AES-256, including header-encrypted) and ALL RAR/RAR5
+// (better fidelity than libarchive's clean-room RAR reader), plus the matching
+// multi-volume chains. The runtime `7z.dll` is loaded ON DEMAND the first time
+// this backend actually runs (the `Bit7zLibrary` is constructed lazily inside
+// extractToStaging), so plain-zip/libarchive paths never touch 7z.dll and cold
+// start is unaffected. Progress/cancel/password semantics mirror
+// LibarchiveExtractor so the UI stays backend-agnostic.
+class SevenZipExtractor final : public IExtractor {
+   public:
+    ExtractResult extractToStaging(const PipelinePlan& plan,
+                                   std::wstring_view sourcePath,
+                                   std::wstring_view stagingDir,
+                                   const ExtractCallbacks& callbacks) override;
+};
+
+// --- Backend selection / encryption query ----------------------------------
+
+// Complete the detector's encryption re-route hook (ReroutedForEncryption) by
+// performing the real, open-time encryption query and returning the backend the
+// engine must actually drive for `sourcePath`.
+//
+// For a plan already routed to SevenZipDll (RAR, or a content-sniffed encrypted
+// 7z) the answer is SevenZipDll with no probe. For a plan tentatively on
+// LibArchive whose format is 7z, this opens the archive via libarchive and
+// checks archive_read_has_encrypted_entries(); an encrypted 7z re-routes to
+// SevenZipDll, everything else stays put (libarchive decrypts zip itself). The
+// probe is cheap (open + header peek, no extraction) and never throws.
+Backend ResolveBackend(const PipelinePlan& plan, std::wstring_view sourcePath);
+
+// --- Multi-volume completeness ---------------------------------------------
+
+// Verify that every sibling volume of a multi-volume set named by `firstPart`
+// is present in its directory. Returns true for non-multi-volume plans (nothing
+// to check). On a gap, returns false and sets `missing` to the name of the
+// first missing volume (basename only) so the caller can surface a precise,
+// non-truncating error. Recognizes the 7z split (.7z.NNN), RAR new-style
+// (.partN.rar), and RAR old-style (.rar + .rNN) chains.
+bool VerifyMultiVolumeComplete(const PipelinePlan& plan,
+                               std::wstring_view firstPart,
+                               std::wstring& missing);
+
 // --- Temp-staging utilities -------------------------------------------------
 
 // Create a hidden temp staging directory `<workDir>\.archive-extractor-tmp-<id>`

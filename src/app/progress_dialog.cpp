@@ -241,9 +241,15 @@ void WorkerFlow(DialogState* st) {
 
     // --- Detect (02) -------------------------------------------------------
     PipelinePlan plan = DetectFile(archivePath);
-    if (!plan.supported() || plan.backend != Backend::LibArchive) {
-        // Out of scope: encrypted-7z/RAR (SevenZipDll) and brotli backends land
-        // in later tasks. Surface as the catalog "unsupported" condition.
+    const std::wstring detectSource =
+        plan.firstPartPath.empty() ? archivePath : plan.firstPartPath;
+    // Complete the encryption re-route (09): a plain-7z that is actually
+    // encrypted moves from libarchive to the 7z.dll backend here.
+    plan.backend = ResolveBackend(plan, detectSource);
+    if (!plan.supported() ||
+        (plan.backend != Backend::LibArchive &&
+         plan.backend != Backend::SevenZipDll)) {
+        // Out of scope: brotli (task 11). Surface as the catalog "unsupported".
         fail(ErrorCodeFromPlan(plan), plan.format, L"format/backend unsupported");
         return;
     }
@@ -272,7 +278,11 @@ void WorkerFlow(DialogState* st) {
     // Password hook is task 10 — pass nothing (engine treats null as "no
     // password" and surfaces NeedPassword if it hits an encrypted entry).
 
-    LibarchiveExtractor extractor;
+    LibarchiveExtractor libExtractor;
+    SevenZipExtractor sevenZipExtractor;
+    IExtractor& extractor = (plan.backend == Backend::SevenZipDll)
+                                ? static_cast<IExtractor&>(sevenZipExtractor)
+                                : static_cast<IExtractor&>(libExtractor);
     const std::wstring sourcePath =
         plan.firstPartPath.empty() ? archivePath : plan.firstPartPath;
     ExtractResult er =
