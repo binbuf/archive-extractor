@@ -1,0 +1,29 @@
+.claude/
+
+# Build output
+/build/
+/out/
+
+# vcpkg manifest-mode install tree & buildtrees
+/vcpkg_installed/
+vcpkg-bootstrap.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+
+# IDE / editor
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Generated test assets (produced by scripts/gen-test-assets.py)
+/tests/assets/
+
+# Misc
+*.obj
+*.exe
+*.pdb
+*.ilk

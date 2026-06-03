@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "archive-extractor",
+  "version": "0.1.0",
+  "description": "macOS-Archive-Utility-style archive extractor for Windows. Engine deps: libarchive (+zlib/bzip2/lz4/lzma/zstd/crypto), brotli (.br), bit7z/7z.dll (encrypted 7z + RAR), gtest.",
+  "homepage": "https://github.com/binbuf/archive-extractor",
+  "builtin-baseline": "a29711cc86340a43c054cd37b8bd2871332a01e9",
+  "dependencies": [
+    {
+      "name": "libarchive",
+      "features": ["bzip2", "lz4", "lzma", "zstd", "crypto"]
+    },
+    "brotli",
+    "bit7z",
+    "gtest"
+  ]
+}
