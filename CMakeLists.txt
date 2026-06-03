@@ -44,9 +44,16 @@ add_library(archive_core STATIC
   src/core/paths.cpp
   src/core/logging.cpp
   src/core/detect.cpp
+  src/core/extract.cpp
 )
 target_include_directories(archive_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(archive_core PUBLIC cxx_std_20)
+
+# libarchive (primary extraction backend) + ole32 for CoCreateGuid. PRIVATE:
+# the public archive_core headers do not expose libarchive types, so consumers
+# (exe, tests) need not see it — they just link the resulting static lib.
+find_package(LibArchive REQUIRED)
+target_link_libraries(archive_core PRIVATE LibArchive::LibArchive ole32)
 
 # ---------------------------------------------------------------------------
 # ArchiveExtractor.exe — Win32 GUI-subsystem front end.
@@ -68,6 +75,7 @@ add_executable(archive_core_tests
   tests/test_cli.cpp
   tests/test_paths.cpp
   tests/test_detect.cpp
+  tests/test_extract.cpp
 )
 target_link_libraries(archive_core_tests PRIVATE archive_core GTest::gtest GTest::gtest_main)
 # Real header fixtures live in the generated corpus under tests/assets. Tests
