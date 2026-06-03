@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Local dev build / test / uninstall helper for ArchiveExtractor.
+    Local dev build / test / install / uninstall helper for ArchiveExtractor.
 
 .DESCRIPTION
     Sets up the VS x64 toolchain (via scripts\dev-env.cmd), then configures,
@@ -10,6 +10,10 @@
     -Release           : build the RELEASE config (and run its tests) instead.
     -Clean             : rebuild this config's project from scratch (preserving the
                          prebuilt vcpkg dependencies; see note below).
+    -Install           : after a green build, register (elevated) the file-type
+                         associations to point at THIS local build's exe, so
+                         double-clicking an archive launches it. Re-run after any
+                         build to repoint Windows at the latest exe.
     -Uninstall         : run the built exe's --unregister (elevated) to remove the
                          file-type association registry entries, then exit. Does not
                          build or test. Combine with -Release to pick the release exe.
@@ -28,21 +32,24 @@
     .\scripts\build.ps1 -Release        # release build + tests
     .\scripts\build.ps1 -Clean          # clean debug rebuild (keeps deps) + tests
     .\scripts\build.ps1 -Release -Clean # clean release rebuild (keeps deps) + tests
+    .\scripts\build.ps1 -Install        # build debug, then register it (elevated)
+    .\scripts\build.ps1 -Release -Install   # build release, then register it (elevated)
     .\scripts\build.ps1 -Uninstall      # remove file associations (elevated)
-
-.NOTES
-    To register associations for manual double-click testing (elevated):
-        Start-Process .\build\x64-debug\ArchiveExtractor.exe -ArgumentList '--register' -Verb RunAs
 #>
 [CmdletBinding()]
 param(
     [switch]$Release,
     [switch]$Clean,
+    [switch]$Install,
     [switch]$Uninstall
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($Install -and $Uninstall) {
+    throw "-Install and -Uninstall are mutually exclusive; pick one."
+}
 
 # --- Paths & config --------------------------------------------------------
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -60,6 +67,17 @@ function Write-Step([string]$Message) {
 
 function Assert-LastExit([string]$What) {
     if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)." }
+}
+
+# Run the app with a registration argument elevated (HKLM needs admin). Launches
+# just the exe with a UAC prompt rather than re-running this whole script as
+# admin, and surfaces the exe's exit code.
+function Invoke-RegistrationVerb([string]$exe, [string]$argument, [string]$label) {
+    Write-Step "$label via: $exe $argument (elevated)"
+    $proc = Start-Process -FilePath $exe -ArgumentList $argument -Verb RunAs -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        throw "$argument failed (exit $($proc.ExitCode)). (Did you approve the elevation prompt?)"
+    }
 }
 
 # Ensure $BuildDir has a complete prebuilt vcpkg_installed tree. If it doesn't,
@@ -106,11 +124,7 @@ if ($Uninstall) {
         }
     }
 
-    Write-Step "Removing file associations via: $exeToUse --unregister (elevated)"
-    $proc = Start-Process -FilePath $exeToUse -ArgumentList '--unregister' -Verb RunAs -Wait -PassThru
-    if ($proc.ExitCode -ne 0) {
-        throw "--unregister failed (exit $($proc.ExitCode)). (Did you approve the elevation prompt?)"
-    }
+    Invoke-RegistrationVerb $exeToUse '--unregister' 'Removing file associations'
     Write-Host "File associations removed." -ForegroundColor Green
     return
 }
@@ -164,3 +178,18 @@ Assert-LastExit 'ctest'
 Write-Host ""
 Write-Host "Done: $Config build green." -ForegroundColor Green
 Write-Host "  Exe: $Exe"
+
+# --- -Install: point the file associations at this local build (elevated) --
+# registration.cpp writes shell\open\command / DefaultIcon from the registering
+# process's own path, so registering THIS exe makes double-click launch the
+# local build. Re-run -Install after any rebuild to repoint at the latest exe.
+if ($Install) {
+    Invoke-RegistrationVerb $Exe '--register' 'Registering local build for file associations'
+    Write-Host ""
+    Write-Host "Installed: archive associations now point at this build." -ForegroundColor Green
+    $relFlag = if ($Release) { ' -Release' } else { '' }
+    Write-Host "  Test     : double-click a supported archive, or run  $Exe <archive>"
+    Write-Host "  Owned ext: for already-claimed types like .zip, set the default via"
+    Write-Host "             $Exe --set-default <file>  (opens the Windows picker)"
+    Write-Host "  Remove   : .\scripts\build.ps1 -Uninstall$relFlag"
+}
