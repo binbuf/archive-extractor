@@ -1,20 +1,10 @@
-<div align="center">
-
-<img src="assets/app.ico" width="96" alt="Archive Extractor icon">
-
-# Archive Extractor
+# Archive Extractor 
 
 **A macOS-style, performant archive extractor for Windows 11/10.**
 
-<img src="docs/screenshots/explorer.jpg" width="380" alt="Extracted files revealed in Explorer">
-<br />
-<img src="docs/screenshots/app.jpg" width="380" alt="Extraction progress dialog">
+<img src="docs/screen.gif" width="640" alt="Archive Extractor in action">
 
-</div>
-
----
-
-Archive Extractor is a tiny, native **Win32 (C++20)** application that brings the one-click feel of the macOS Archive Utility to Windows. It registers itself as a file handler, so opening a supported archive is instant and just works.
+Archive Extractor is a tiny, native **Win32 (C++20)** application that brings the feel of the macOS Archive Utility to Windows. It registers itself as a file handler, so opening a supported archive is instant and just works.
 
 ## Features
 
