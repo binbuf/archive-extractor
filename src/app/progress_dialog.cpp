@@ -278,8 +278,8 @@ void WorkerFlow(DialogState* st) {
     plan.backend = ResolveBackend(plan, detectSource);
     if (!plan.supported() ||
         (plan.backend != Backend::LibArchive &&
-         plan.backend != Backend::SevenZipDll)) {
-        // Out of scope: brotli (task 11). Surface as the catalog "unsupported".
+         plan.backend != Backend::SevenZipDll &&
+         plan.backend != Backend::Brotli)) {
         fail(ErrorCodeFromPlan(plan), plan.format, L"format/backend unsupported");
         return;
     }
@@ -330,9 +330,13 @@ void WorkerFlow(DialogState* st) {
 
     LibarchiveExtractor libExtractor;
     SevenZipExtractor sevenZipExtractor;
-    IExtractor& extractor = (plan.backend == Backend::SevenZipDll)
-                                ? static_cast<IExtractor&>(sevenZipExtractor)
-                                : static_cast<IExtractor&>(libExtractor);
+    BrotliExtractor brotliExtractor;
+    IExtractor& extractor =
+        (plan.backend == Backend::SevenZipDll)
+            ? static_cast<IExtractor&>(sevenZipExtractor)
+        : (plan.backend == Backend::Brotli)
+            ? static_cast<IExtractor&>(brotliExtractor)
+            : static_cast<IExtractor&>(libExtractor);
     const std::wstring sourcePath =
         plan.firstPartPath.empty() ? archivePath : plan.firstPartPath;
     ExtractResult er =

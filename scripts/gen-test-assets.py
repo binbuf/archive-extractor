@@ -536,6 +536,19 @@ def gen_single_stream(out: Path) -> None:
         record(name, fmt_key, "single-file", None, "created",
                outcome=f"single-stream -> place inner file '{inner}' directly")
 
+    # Stemless brotli: a file literally named ".br" — stripping the ".br" leaves
+    # nothing, so the extractor must fall back to the archive stem (and finally a
+    # generic name) rather than producing an empty filename. Exercises the
+    # output-name fallback path that page.html.br (name-strip) does not.
+    try:
+        blob = comp_br(_txt("stemless brotli payload.\n" * 4))
+    except (Unavailable, subprocess.CalledProcessError) as e:
+        record(".br", "br", "single-file-stemless", None, "skipped", reason=str(e))
+    else:
+        (out / ".br").write_bytes(blob)
+        record(".br", "br", "single-file-stemless", None, "created",
+               outcome="stemless single-stream -> output name falls back to stem")
+
 
 def gen_passwords(out: Path, password: str) -> None:
     print(f"\n== Password protected (password = '{password}') ==")

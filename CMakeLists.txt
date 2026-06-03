@@ -46,6 +46,7 @@ add_library(archive_core STATIC
   src/core/detect.cpp
   src/core/extract.cpp
   src/core/sevenzip.cpp
+  src/core/brotli.cpp
   src/core/layout.cpp
   src/core/retry.cpp
   src/core/error_model.cpp
@@ -67,8 +68,13 @@ find_package(LibArchive REQUIRED)
 # multi-volume chains. The vcpkg port exports unofficial::bit7z::bit7z64; it
 # transitively pulls in 7zip::7zip (the static 7-zip SDK glue) and oleaut32.
 find_package(unofficial-bit7z CONFIG REQUIRED)
+# brotli (task 11): the third backend. libarchive has no brotli support, so `.br`
+# (and the rare `.tar.br`) are decoded with Google's reference library. We only
+# need the decoder; it pulls in brotlicommon transitively. Statically linked and
+# only invoked from BrotliExtractor, so cold start for other formats is unchanged.
+find_package(unofficial-brotli CONFIG REQUIRED)
 target_link_libraries(archive_core PRIVATE LibArchive::LibArchive
-  unofficial::bit7z::bit7z64 ole32 shell32 advapi32)
+  unofficial::bit7z::bit7z64 unofficial::brotli::brotlidec ole32 shell32 advapi32)
 
 # ---------------------------------------------------------------------------
 # Runtime 7z.dll. bit7z is a static wrapper that LoadLibrary's 7z.dll on demand
@@ -147,6 +153,7 @@ add_executable(archive_core_tests
   tests/test_paths.cpp
   tests/test_detect.cpp
   tests/test_extract.cpp
+  tests/test_brotli.cpp
   tests/test_sevenzip.cpp
   tests/test_passwords.cpp
   tests/test_layout.cpp

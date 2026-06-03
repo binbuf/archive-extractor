@@ -195,7 +195,9 @@ TEST(Plan, TarBrPlansBrotliThenTar) {
     const auto p = PlanFromHeader(L"site/tarbr__single-file.tar.br", h);
     EXPECT_EQ(p.format, Format::Tar);
     EXPECT_EQ(p.kind, Kind::Container);   // a tar inside -> container
-    EXPECT_EQ(p.backend, Backend::LibArchive);
+    // The brotli wrapping filter forces the brotli backend (libarchive cannot
+    // decompress brotli); BrotliExtractor decodes to a temp tar then untars.
+    EXPECT_EQ(p.backend, Backend::Brotli);
     ASSERT_EQ(p.filters.size(), 1u);
     EXPECT_EQ(p.filters[0], Filter::Brotli);   // brotli -> tar
     EXPECT_EQ(p.stem, L"tarbr__single-file");

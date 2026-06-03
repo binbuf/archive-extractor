@@ -346,6 +346,14 @@ std::wstring StripSingleStreamExt(std::wstring_view originalName,
 }
 
 Backend RouteBackend(Format f, const std::vector<Filter>& filters) {
+    if (f == Format::Unknown) return Backend::None;
+    // Any brotli wrapping filter must go through our brotli backend — libarchive
+    // cannot decompress brotli. This covers both the bare `.br` single stream
+    // (format == Brotli) and the compound `.tar.br` (format == Tar, brotli
+    // filter): the latter is brotli-decoded to a temp tar, then untarred.
+    for (const Filter fil : filters) {
+        if (fil == Filter::Brotli) return Backend::Brotli;
+    }
     switch (f) {
         case Format::Unknown:
             return Backend::None;

@@ -157,6 +157,30 @@ class SevenZipExtractor final : public IExtractor {
                                    const ExtractCallbacks& callbacks) override;
 };
 
+// The Google-brotli-backed implementation (task 11). libarchive has no brotli
+// support, so `.br` is handled here. Two shapes, decided by `plan.kind` (brotli
+// is detected by extension only — it has no magic header):
+//   * Single-file `.br` (Kind::SingleStream): decode the stream straight to one
+//     output file named by `plan.outputNameHint` (page.html.br -> page.html),
+//     falling back to `plan.stem` and finally "output" when nothing remains.
+//     This is the common path and is optimized as a direct streaming decode (no
+//     temp file). It routes through the single-stream -> place-directly layout.
+//   * `.tar.br` (Kind::Container, the uncommon branch): brotli-decode to a temp
+//     `.tar` on the destination volume, then untar it via LibarchiveExtractor so
+//     the layout rules apply to the TAR's entries. The temp `.tar` is removed on
+//     every path.
+// brotli is statically linked but only ever invoked from here, so it is touched
+// solely for `.br`/`.tar.br` inputs — cold start for every other format is
+// unaffected. Progress/cancel semantics mirror LibarchiveExtractor; single-file
+// progress is driven by compressed bytes read vs file size.
+class BrotliExtractor final : public IExtractor {
+   public:
+    ExtractResult extractToStaging(const PipelinePlan& plan,
+                                   std::wstring_view sourcePath,
+                                   std::wstring_view stagingDir,
+                                   const ExtractCallbacks& callbacks) override;
+};
+
 // --- Backend selection / encryption query ----------------------------------
 
 // Complete the detector's encryption re-route hook (ReroutedForEncryption) by
