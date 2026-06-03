@@ -6,6 +6,7 @@
 #include "archive_core/layout.h"
 #include "archive_core/logging.h"
 #include "archive_core/paths.h"
+#include "shell_reveal.h"
 
 #include <atomic>
 #include <format>
@@ -203,18 +204,6 @@ void ShowDialogWindow(DialogState* st) {
     st->shown = true;
     ShowWindow(st->hwnd, SW_SHOWNORMAL);
     SetForegroundWindow(st->hwnd);
-}
-
-// ---------------------------------------------------------------------------
-// Reveal hook (task 07 stub). The real Explorer reveal is implemented later;
-// for now we just log the path that would be revealed.
-// ---------------------------------------------------------------------------
-void RevealStub(const std::wstring& placedPath) {
-    if (placedPath.empty()) {
-        Log(L"[reveal] (stub) nothing to reveal (empty archive)");
-        return;
-    }
-    Log(std::format(L"[reveal] (stub) would reveal: {}", placedPath));
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +405,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 st->result.outcome = wr->outcome;
                 st->result.error = wr->error;
                 if (wr->outcome == DialogOutcome::Success) {
-                    RevealStub(wr->revealPath);
+                    // Runs on the UI thread, which has COM initialized as an STA
+                    // (CoInitializeEx APARTMENTTHREADED at startup) — the correct
+                    // thread for IShellWindows / SHOpenFolderAndSelectItems.
+                    RevealInExplorer(wr->revealPath);
                 }
             }
             DestroyWindow(hwnd);

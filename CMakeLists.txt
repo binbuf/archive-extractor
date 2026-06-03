@@ -67,12 +67,14 @@ add_executable(ArchiveExtractor WIN32
   src/app/main.cpp
   src/app/progress_dialog.cpp
   src/app/error_dialog.cpp
+  src/app/shell_reveal.cpp
   src/app/app.manifest
 )
 # comctl32: themed progress bar / button (v6 via the manifest).
 # shlwapi: PathFindFileNameW for the archive label.
+# oleaut32: VariantInit/VariantClear used by the IShellWindows reveal path.
 target_link_libraries(ArchiveExtractor PRIVATE
-  archive_core ole32 user32 shell32 comctl32 shlwapi)
+  archive_core ole32 oleaut32 user32 shell32 comctl32 shlwapi)
 # wWinMain (wide entry) requires the wide CRT startup under /SUBSYSTEM:WINDOWS.
 target_link_options(ArchiveExtractor PRIVATE /ENTRY:wWinMainCRTStartup)
 
