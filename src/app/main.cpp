@@ -1,6 +1,8 @@
 #include "archive_core/cli.h"
+#include "archive_core/error_model.h"
 #include "archive_core/logging.h"
 #include "archive_core/paths.h"
+#include "error_dialog.h"
 #include "progress_dialog.h"
 
 #include <cstdio>
@@ -14,6 +16,7 @@
 #include <windows.h>
 #include <objbase.h>   // CoInitializeEx / CoUninitialize
 #include <shellapi.h>  // CommandLineToArgvW
+#include <shlwapi.h>   // PathFindFileNameW
 
 namespace {
 
@@ -29,9 +32,14 @@ std::vector<std::wstring> CollectArgs() {
     return args;
 }
 
-void ShowError(const std::wstring& text) {
-    // Placeholder error UI — replaced by the real error dialog in task 06.
-    MessageBoxW(nullptr, text.c_str(), L"Archive Extractor", MB_OK | MB_ICONERROR);
+// Leaf name (with extension) for naming the archive in error messages.
+std::wstring LeafName(const std::wstring& path) {
+    return PathFindFileNameW(path.c_str());
+}
+
+// Show the unified error dialog (task 06) for a catalog code + archive name.
+void ShowError(ae::ErrorCode code, const std::wstring& archivePath) {
+    ae::ShowErrorDialog(ae::MakeError(code, LeafName(archivePath)));
 }
 
 // Make Log() output visible when launched from a terminal, while respecting any
@@ -57,13 +65,17 @@ void AttachParentConsole() {
 
 int RunExtract(const ae::CommandLine& cl, HINSTANCE hInstance) {
     if (!ae::PathExists(cl.archivePath)) {
-        ae::Log(std::format(L"[error] file not found: {}", cl.archivePath));
-        ShowError(std::format(L"File not found:\n{}", cl.archivePath));
+        ae::Log(std::format(L"[error] code={} archive={}",
+                            ae::ErrorCodeToken(ae::ErrorCode::FileNotFound),
+                            LeafName(cl.archivePath)));
+        ShowError(ae::ErrorCode::FileNotFound, cl.archivePath);
         return 2;
     }
     if (!ae::HasSupportedExtension(cl.archivePath)) {
-        ae::Log(std::format(L"[error] unsupported file type: {}", cl.archivePath));
-        ShowError(std::format(L"Unsupported file type:\n{}", cl.archivePath));
+        ae::Log(std::format(L"[error] code={} archive={}",
+                            ae::ErrorCodeToken(ae::ErrorCode::Unsupported),
+                            LeafName(cl.archivePath)));
+        ShowError(ae::ErrorCode::Unsupported, cl.archivePath);
         return 3;
     }
 
@@ -85,13 +97,18 @@ int RunExtract(const ae::CommandLine& cl, HINSTANCE hInstance) {
             ae::Log(L"[extract] cancelled by user");
             return 0;  // user cancellation is not an error exit
         case ae::DialogOutcome::Failed:
-        default:
-            ae::Log(std::format(L"[extract] failed: {}", dr.errorMessage));
-            // Placeholder error UI until task 06 supplies the real dialog.
-            ShowError(dr.errorMessage.empty()
-                          ? std::wstring(L"Extraction failed.")
-                          : dr.errorMessage);
+        default: {
+            // The worker already logged the code/format; show the real error
+            // dialog from the unified error model (temp staging removed by the
+            // flow — no partial output remains).
+            ae::ErrorInfo info = dr.error;
+            if (!info.isError()) {
+                info = ae::MakeError(ae::ErrorCode::Internal,
+                                     LeafName(cl.archivePath));
+            }
+            ae::ShowErrorDialog(info);
             return 4;
+        }
     }
 }
 
@@ -99,11 +116,14 @@ int RunExtract(const ae::CommandLine& cl, HINSTANCE hInstance) {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     AttachParentConsole();
+    // Rotating diagnostic log at %LOCALAPPDATA%\ArchiveExtractor\log.txt. Records
+    // format / error code / failing entry; never archive contents or passwords.
+    ae::InitFileLog();
 
     const HRESULT hr =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr)) {
-        ShowError(L"Failed to initialize COM.");
+        ae::ShowErrorDialog(ae::MakeError(ae::ErrorCode::Internal, L""));
         return 1;
     }
 

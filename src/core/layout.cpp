@@ -11,6 +11,7 @@
 
 #include "archive_core/extract.h"  // ToExtendedPath, RemoveDirTree, SameVolume
 #include "archive_core/logging.h"
+#include "archive_core/retry.h"
 
 namespace ae {
 
@@ -117,24 +118,40 @@ std::wstring MakeNonCollidingName(std::wstring_view dir, std::wstring_view name,
 
 namespace {
 
-PlaceResult Fail(PlaceStatus st, std::wstring msg, std::size_t count = 0) {
+PlaceResult Fail(PlaceStatus st, std::wstring msg, std::size_t count = 0,
+                 unsigned long lastError = 0) {
     PlaceResult r;
     r.status = st;
     r.message = std::move(msg);
     r.rootEntryCount = count;
+    r.lastError = lastError;
     return r;
 }
 
 // Move `from` (a normal path) to `to` (a normal path) via a same-volume rename.
 // Both are extended-path-prefixed for the call. No overwrite flag is set — the
 // caller guarantees `to` is free (collision probing done up front).
-bool RenameMove(std::wstring_view from, std::wstring_view to) {
+//
+// A just-created destination can be transiently locked by AV / the indexer
+// (design 06 "File in use / locked on move"; 07 §14), so the rename is run
+// through RetryWithBackoff: it retries only on transient lock errors, then
+// reports the final Win32 error via `outErr` so the caller can classify it.
+bool RenameMove(std::wstring_view from, std::wstring_view to,
+                unsigned long& outErr) {
     const std::wstring f = ToExtendedPath(from);
     const std::wstring t = ToExtendedPath(to);
     // No MOVEFILE_REPLACE_EXISTING: never overwrite. MOVEFILE_COPY_ALLOWED is
     // deliberately OMITTED so this stays an O(1) rename and fails loudly if the
     // dirs are unexpectedly cross-volume (which would otherwise silently copy).
-    return MoveFileExW(f.c_str(), t.c_str(), 0) != 0;
+    unsigned long lastErr = 0;
+    const bool ok = RetryWithBackoff([&](unsigned long& err) {
+        if (MoveFileExW(f.c_str(), t.c_str(), 0)) return true;
+        err = GetLastError();
+        lastErr = err;  // remember the final failure for the caller
+        return false;
+    });
+    outErr = ok ? 0 : lastErr;
+    return ok;
 }
 
 }  // namespace
@@ -198,14 +215,14 @@ PlaceResult LayoutPlanner::place(std::wstring_view stagingDir,
     const std::wstring target = JoinPath(work, finalName);
 
     // --- The atomic move ----------------------------------------------------
-    if (!RenameMove(sourceItem, target)) {
-        const DWORD e = GetLastError();
+    unsigned long moveErr = 0;
+    if (!RenameMove(sourceItem, target, moveErr)) {
         // Leave the working dir untouched: remove the temp tree on any failure.
         RemoveDirTree(staging);
         return Fail(PlaceStatus::PlaceFailed,
-                    L"placement move failed (error " + std::to_wstring(e) +
-                        L")",
-                    count);
+                    L"placement move failed (error " +
+                        std::to_wstring(moveErr) + L")",
+                    count, moveErr);
     }
 
     // --- Cleanup ------------------------------------------------------------

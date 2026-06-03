@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "archive_core/error_model.h"
+
 namespace ae {
 
 // Outcome of the orchestrated extraction flow driven behind the progress
@@ -15,10 +17,11 @@ enum class DialogOutcome {
 // Result of RunExtractionDialog.
 struct DialogResult {
     DialogOutcome outcome = DialogOutcome::Failed;
-    // On failure, a short user-facing message describing the problem (already
-    // includes the archive name). Empty otherwise. The caller routes this to the
-    // placeholder error UI (real error dialog is task 06).
-    std::wstring errorMessage;
+    // On failure, the unified error model entry (code + plain-language message
+    // naming the archive). The caller (main.cpp) routes `error` to the real
+    // error dialog (task 06). `error.message` mirrors the displayed body; on
+    // success/cancel `error.code` is ErrorCode::None.
+    ErrorInfo error;
 };
 
 // Run the full extraction flow behind a small, centered, modeless progress

@@ -46,6 +46,8 @@ add_library(archive_core STATIC
   src/core/detect.cpp
   src/core/extract.cpp
   src/core/layout.cpp
+  src/core/retry.cpp
+  src/core/error_model.cpp
 )
 target_include_directories(archive_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(archive_core PUBLIC cxx_std_20)
@@ -53,8 +55,9 @@ target_compile_features(archive_core PUBLIC cxx_std_20)
 # libarchive (primary extraction backend) + ole32 for CoCreateGuid. PRIVATE:
 # the public archive_core headers do not expose libarchive types, so consumers
 # (exe, tests) need not see it — they just link the resulting static lib.
+# shell32: SHGetKnownFolderPath (rotating-log path resolution in logging.cpp).
 find_package(LibArchive REQUIRED)
-target_link_libraries(archive_core PRIVATE LibArchive::LibArchive ole32)
+target_link_libraries(archive_core PRIVATE LibArchive::LibArchive ole32 shell32)
 
 # ---------------------------------------------------------------------------
 # ArchiveExtractor.exe — Win32 GUI-subsystem front end.
@@ -63,6 +66,7 @@ target_link_libraries(archive_core PRIVATE LibArchive::LibArchive ole32)
 add_executable(ArchiveExtractor WIN32
   src/app/main.cpp
   src/app/progress_dialog.cpp
+  src/app/error_dialog.cpp
   src/app/app.manifest
 )
 # comctl32: themed progress bar / button (v6 via the manifest).
@@ -82,6 +86,7 @@ add_executable(archive_core_tests
   tests/test_detect.cpp
   tests/test_extract.cpp
   tests/test_layout.cpp
+  tests/test_error_model.cpp
 )
 target_link_libraries(archive_core_tests PRIVATE archive_core GTest::gtest GTest::gtest_main)
 # Real header fixtures live in the generated corpus under tests/assets. Tests

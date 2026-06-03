@@ -1,6 +1,7 @@
 #include "progress_dialog.h"
 
 #include "archive_core/detect.h"
+#include "archive_core/error_model.h"
 #include "archive_core/extract.h"
 #include "archive_core/layout.h"
 #include "archive_core/logging.h"
@@ -53,7 +54,7 @@ constexpr int kGapDip = 12;
 // Result the worker hands back to the UI thread on completion.
 struct WorkerResult {
     DialogOutcome outcome = DialogOutcome::Failed;
-    std::wstring errorMessage;
+    ErrorInfo error;          // populated on failure (code + message)
     std::wstring revealPath;  // placed top-level item (success only)
 };
 
@@ -230,37 +231,43 @@ void WorkerFlow(DialogState* st) {
                      reinterpret_cast<LPARAM>(new WorkerResult(std::move(wr))));
     };
 
+    // Build a failure WorkerResult from the unified error model and log the
+    // code + format (never contents/passwords) before posting it.
+    auto fail = [&](ErrorCode code, Format format,
+                    std::wstring_view detail = std::wstring_view()) {
+        WorkerResult wr;
+        wr.outcome = DialogOutcome::Failed;
+        wr.error = MakeError(code, st->fileName);
+        Log(std::format(L"[error] code={} format={} archive={}{}",
+                        ErrorCodeToken(code), static_cast<int>(format),
+                        st->fileName,
+                        detail.empty() ? std::wstring()
+                                       : std::format(L" detail={}", detail)));
+        postDone(std::move(wr));
+    };
+
+    auto cancelled = [&]() {
+        postDone(WorkerResult{DialogOutcome::Cancelled, ErrorInfo{}, L""});
+    };
+
     // --- Detect (02) -------------------------------------------------------
     PipelinePlan plan = DetectFile(archivePath);
     if (!plan.supported() || plan.backend != Backend::LibArchive) {
         // Out of scope: encrypted-7z/RAR (SevenZipDll) and brotli backends land
-        // in later tasks. Report as a failure for now.
-        WorkerResult wr;
-        wr.outcome = DialogOutcome::Failed;
-        wr.errorMessage = std::format(
-            L"Couldn't expand \"{}\". This format isn't supported yet.",
-            st->fileName);
-        Log(std::format(L"[extract] unsupported plan (format/backend) for {}",
-                        archivePath));
-        postDone(std::move(wr));
+        // in later tasks. Surface as the catalog "unsupported" condition.
+        fail(ErrorCodeFromPlan(plan), plan.format, L"format/backend unsupported");
         return;
     }
 
     if (st->cancel.IsCancelled()) {
-        postDone(WorkerResult{DialogOutcome::Cancelled, L"", L""});
+        cancelled();
         return;
     }
 
     // --- Staging dir (03) --------------------------------------------------
     const std::wstring stagingDir = CreateStagingDir(workingDir);
     if (stagingDir.empty()) {
-        WorkerResult wr;
-        wr.outcome = DialogOutcome::Failed;
-        wr.errorMessage = std::format(
-            L"Couldn't expand \"{}\". Failed to create a temporary folder.",
-            st->fileName);
-        Log(L"[extract] CreateStagingDir failed");
-        postDone(std::move(wr));
+        fail(ErrorCode::Internal, plan.format, L"CreateStagingDir failed");
         return;
     }
 
@@ -283,35 +290,20 @@ void WorkerFlow(DialogState* st) {
         extractor.extractToStaging(plan, sourcePath, stagingDir, cb);
 
     if (er.status == ExtractStatus::Cancelled) {
-        RemoveDirTree(stagingDir);
+        RemoveDirTree(stagingDir);  // defensive: clean temp on cancel
         Log(L"[extract] cancelled; temp removed");
-        postDone(WorkerResult{DialogOutcome::Cancelled, L"", L""});
+        cancelled();
         return;
     }
     if (er.status != ExtractStatus::Ok) {
-        RemoveDirTree(stagingDir);
-        WorkerResult wr;
-        wr.outcome = DialogOutcome::Failed;
-        wr.errorMessage = std::format(
-            L"Couldn't expand \"{}\". {}", st->fileName,
-            er.status == ExtractStatus::CorruptInput
-                ? L"The archive appears to be corrupt."
-            : er.status == ExtractStatus::Untrusted
-                ? L"The archive contains an unsafe path."
-            : er.status == ExtractStatus::NeedPassword
-                ? L"The archive is password protected."
-            : er.status == ExtractStatus::WriteFailed
-                ? L"A file could not be written."
-                : L"The archive could not be opened.");
-        Log(std::format(L"[extract] failed status={} msg={}",
-                        static_cast<int>(er.status), er.message));
-        postDone(std::move(wr));
+        RemoveDirTree(stagingDir);  // fail clean: no partial output left behind
+        fail(ErrorCodeFromExtract(er.status), plan.format, er.message);
         return;
     }
 
     if (st->cancel.IsCancelled()) {
         RemoveDirTree(stagingDir);
-        postDone(WorkerResult{DialogOutcome::Cancelled, L"", L""});
+        cancelled();
         return;
     }
 
@@ -330,14 +322,8 @@ void WorkerFlow(DialogState* st) {
     }
     if (pr.status != PlaceStatus::Ok) {
         RemoveDirTree(stagingDir);  // planner removes on error, but be safe
-        WorkerResult wr;
-        wr.outcome = DialogOutcome::Failed;
-        wr.errorMessage = std::format(
-            L"Couldn't expand \"{}\". The extracted files could not be placed.",
-            st->fileName);
-        Log(std::format(L"[place] failed status={} msg={}",
-                        static_cast<int>(pr.status), pr.message));
-        postDone(std::move(wr));
+        fail(ErrorCodeFromPlace(pr.status, pr.lastError), plan.format,
+             pr.message);
         return;
     }
 
@@ -428,7 +414,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 st->finished = true;
                 KillTimer(hwnd, kShowTimerId);
                 st->result.outcome = wr->outcome;
-                st->result.errorMessage = wr->errorMessage;
+                st->result.error = wr->error;
                 if (wr->outcome == DialogOutcome::Success) {
                     RevealStub(wr->revealPath);
                 }
@@ -521,7 +507,7 @@ DialogResult RunExtractionDialog(const std::wstring& archivePath,
     if (!hwnd) {
         DialogResult r;
         r.outcome = DialogOutcome::Failed;
-        r.errorMessage = L"Failed to create the progress window.";
+        r.error = MakeError(ErrorCode::Internal, st.fileName);
         return r;
     }
 

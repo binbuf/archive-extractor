@@ -34,6 +34,9 @@ struct PlaceResult {
     bool renamed = false;
     // Number of distinct root-level entries observed in the staging dir.
     std::size_t rootEntryCount = 0;
+    // Raw Win32 error from the failing op (0 if none). Lets the error model
+    // refine PlaceFailed into DiskFull / AccessDenied / FileInUse / PathTooLong.
+    unsigned long lastError = 0;
     std::wstring message;  // short diagnostic for logging; never archive bytes
 
     bool ok() const { return status == PlaceStatus::Ok; }
