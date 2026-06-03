@@ -24,6 +24,7 @@ bool IsFlag(std::wstring_view arg, std::wstring_view name) {
 
 CommandLine ParseCommandLine(const std::vector<std::wstring>& args) {
     CommandLine cl;
+    bool wantSetDefault = false;  // saw --set-default; next non-flag is the file
     for (const auto& arg : args) {
         if (IsFlag(arg, L"register")) {
             cl.mode = Mode::Register;
@@ -33,18 +34,27 @@ CommandLine ParseCommandLine(const std::vector<std::wstring>& args) {
             cl.mode = Mode::Unregister;
             return cl;
         }
+        // --set-default [file]: open the OS "Open with" picker so the USER can
+        // make us the default for an owned extension (e.g. .zip). The optional
+        // following token is a sample file of the type to set the default for.
+        if (IsFlag(arg, L"set-default")) {
+            cl.mode = Mode::SetDefault;
+            wantSetDefault = true;
+            continue;
+        }
         if (IsFlag(arg, L"help") || arg == L"-?" || arg == L"/?") {
             cl.showUsage = true;
             return cl;
         }
-        // First non-flag token is the archive path.
+        // First non-flag token is a path: the sample file for --set-default,
+        // otherwise the archive to extract.
         if (!arg.empty() && arg.front() != L'-' && arg.front() != L'/') {
-            cl.mode = Mode::Extract;
             cl.archivePath = arg;
+            if (!wantSetDefault) cl.mode = Mode::Extract;
             return cl;
         }
     }
-    return cl;  // Mode::None
+    return cl;  // Mode::None (or SetDefault with no sample file)
 }
 
 }  // namespace ae

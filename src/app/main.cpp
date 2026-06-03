@@ -2,6 +2,7 @@
 #include "archive_core/error_model.h"
 #include "archive_core/logging.h"
 #include "archive_core/paths.h"
+#include "archive_core/registration.h"
 #include "error_dialog.h"
 #include "progress_dialog.h"
 
@@ -132,14 +133,24 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     switch (cl.mode) {
         case ae::Mode::Register:
-            // Stub — real shell registration lands in task 08.
-            ae::Log(L"[register] stub (no-op); returns success.");
-            exitCode = 0;
+            // Write the per-machine (HKLM) shell registration. Requires
+            // elevation; on a non-elevated process this fails cleanly with a
+            // clear message and a nonzero exit. The installer (task 13) invokes
+            // this same path.
+            exitCode = (ae::Register() == ae::RegResult::Ok) ? 0 : 5;
             break;
         case ae::Mode::Unregister:
-            // Stub — real shell unregistration lands in task 08.
-            ae::Log(L"[unregister] stub (no-op); returns success.");
-            exitCode = 0;
+            // Remove everything --register wrote (idempotent). Requires
+            // elevation just like --register.
+            exitCode = (ae::Unregister() == ae::RegResult::Ok) ? 0 : 5;
+            break;
+        case ae::Mode::SetDefault:
+            // User-driven default-handler picker for OWNED extensions (e.g.
+            // .zip). We never fabricate the UserChoice hash; this opens the OS
+            // "Open with" dialog so the user confirms us as default. Per-user,
+            // no elevation. Wired here as the documented first-run/menu trigger.
+            ae::Log(L"[default] opening OS Open-With picker.");
+            exitCode = ae::PromptSetAsDefault(cl.archivePath) ? 0 : 6;
             break;
         case ae::Mode::Extract:
             exitCode = RunExtract(cl, hInstance);
