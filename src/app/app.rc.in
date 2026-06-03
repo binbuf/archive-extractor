@@ -1,0 +1,8 @@
+// Generated from app.rc.in by CMake (configure_file). Embeds the application
+// icon as resource id 1, which is the lowest icon id and therefore both:
+//   * the icon Explorer shows for ArchiveExtractor.exe itself, and
+//   * icon index 0 of the exe — the target of the ProgID DefaultIcon
+//     "<exe>,0" written by registration.cpp, i.e. the icon shown for every
+//     registered archive extension.
+// @AE_APP_ICON_PATH@ is an absolute path with forward slashes (accepted by rc).
+1 ICON "@AE_APP_ICON_PATH@"

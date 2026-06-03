@@ -100,6 +100,16 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Application icon. assets/app.ico is embedded as icon resource id 1 (icon
+# index 0). That makes it the exe's Explorer icon AND the target of the ProgID
+# DefaultIcon "<exe>,0" (registration.cpp), so registered archive extensions
+# show the same icon. The .rc is generated with an absolute icon path so it
+# resolves regardless of the rc.exe working directory.
+set(AE_APP_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/assets/app.ico")
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/app/app.rc.in
+               ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
+
+# ---------------------------------------------------------------------------
 # ArchiveExtractor.exe — Win32 GUI-subsystem front end.
 # The .manifest source is embedded by the linker (DPI v2 + comctl6 + longPath).
 # ---------------------------------------------------------------------------
@@ -109,6 +119,7 @@ add_executable(ArchiveExtractor WIN32
   src/app/error_dialog.cpp
   src/app/shell_reveal.cpp
   src/app/app.manifest
+  ${CMAKE_CURRENT_BINARY_DIR}/app.rc
 )
 # comctl32: themed progress bar / button (v6 via the manifest).
 # shlwapi: PathFindFileNameW for the archive label.
