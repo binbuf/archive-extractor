@@ -43,6 +43,7 @@ add_library(archive_core STATIC
   src/core/cli.cpp
   src/core/paths.cpp
   src/core/logging.cpp
+  src/core/detect.cpp
 )
 target_include_directories(archive_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(archive_core PUBLIC cxx_std_20)
@@ -66,8 +67,13 @@ find_package(GTest CONFIG REQUIRED)
 add_executable(archive_core_tests
   tests/test_cli.cpp
   tests/test_paths.cpp
+  tests/test_detect.cpp
 )
 target_link_libraries(archive_core_tests PRIVATE archive_core GTest::gtest GTest::gtest_main)
+# Real header fixtures live in the generated corpus under tests/assets. Tests
+# read leading bytes of these via an absolute path baked in at configure time.
+target_compile_definitions(archive_core_tests PRIVATE
+  AE_TEST_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets")
 
 include(GoogleTest)
 gtest_discover_tests(archive_core_tests)
