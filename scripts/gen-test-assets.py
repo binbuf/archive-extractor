@@ -45,6 +45,11 @@ extraction outcome) is written alongside the assets for use by automated tests.
 Usage:
     python scripts/gen-test-assets.py [--out DIR] [--clean] [--no-install]
                                       [--password PW] [--list]
+
+    # Create ONE large archive of a specific format (manual / perf testing):
+    python scripts/gen-test-assets.py --large zip   [--large-size 2G] [--large-files 4]
+    python scripts/gen-test-assets.py --large tar.gz --large-size 512M
+    python scripts/gen-test-assets.py --large xz    --large-size 5G   # >4G: Zip64/64-bit
 """
 
 from __future__ import annotations
@@ -57,6 +62,9 @@ import importlib
 import io
 import json
 import lzma
+import os
+import random
+import shutil
 import struct
 import subprocess
 import sys
@@ -754,6 +762,236 @@ def write_plain_zip_raw(path: Path, files: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Large-archive generator (opt-in, --large)
+#
+# Produces a single, deliberately large archive of one chosen format for manual
+# / performance testing: the determinate progress bar, big-file handling
+# (Zip64 / >4 GB / 64-bit counters), solid-archive decompression pacing, and
+# cancellation responsiveness. It is intentionally NOT added to manifest.json
+# so the normal unit-test suite never tries to extract a multi-gigabyte file.
+#
+# Content is deterministic pseudo-random (effectively incompressible) so the
+# archive on disk is genuinely large, and compression runs at a fast/low setting
+# since size -- not ratio -- is the point. Everything is streamed in chunks so
+# memory stays bounded even for multi-GB targets (the staged data does need that
+# much temporary disk under the system temp dir).
+# --------------------------------------------------------------------------- #
+
+# token -> (output filename, kind, single-stream codec key)
+#   kind: "zip" | "tar" | "7z" | "compound" | "single"
+LARGE_FORMATS = {
+    "zip":    ("large.zip",     "zip",      None),
+    "tar":    ("large.tar",     "tar",      None),
+    "7z":     ("large.7z",      "7z",       None),
+    "targz":  ("large.tar.gz",  "compound", "gz"),
+    "tgz":    ("large.tgz",     "compound", "gz"),
+    "tarbz2": ("large.tar.bz2", "compound", "bz2"),
+    "tbz2":   ("large.tbz2",    "compound", "bz2"),
+    "tarxz":  ("large.tar.xz",  "compound", "xz"),
+    "txz":    ("large.txz",     "compound", "xz"),
+    "tarzst": ("large.tar.zst", "compound", "zst"),
+    "tarlz4": ("large.tar.lz4", "compound", "lz4"),
+    "tarbr":  ("large.tar.br",  "compound", "br"),
+    "gz":     ("large.bin.gz",  "single",   "gz"),
+    "bz2":    ("large.bin.bz2", "single",   "bz2"),
+    "xz":     ("large.bin.xz",  "single",   "xz"),
+    "zst":    ("large.bin.zst", "single",   "zst"),
+    "lz4":    ("large.bin.lz4", "single",   "lz4"),
+    "br":     ("large.bin.br",  "single",   "br"),
+}
+
+_SIZE_UNITS = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+
+
+def parse_size(text: str) -> int:
+    """Parse a human-readable size ('256M', '2G', '1.5G') or a raw byte count."""
+    s = text.strip().upper()
+    if s.endswith("B"):            # accept 'MB' / 'MIB'
+        s = s[:-1]
+    if s.endswith("I"):
+        s = s[:-1]
+    if s and s[-1] in _SIZE_UNITS:
+        return int(float(s[:-1]) * _SIZE_UNITS[s[-1]])
+    return int(s)
+
+
+def normalize_large_token(token: str) -> str:
+    """Map user input ('tar.gz', '.zip', '7Z') to a LARGE_FORMATS key."""
+    return token.strip().lower().lstrip(".").replace(".", "")
+
+
+def _human(n: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TiB"
+
+
+def _fill_random_file(path: Path, size: int, seed: int,
+                      chunk: int = 8 * 1024 * 1024) -> None:
+    """Write `size` bytes of deterministic, incompressible data to `path`."""
+    rng = random.Random(seed)
+    gen = getattr(rng, "randbytes", None)  # Python 3.9+: fast C-level generator
+    if gen is None:                        # ancient Python: non-deterministic
+        gen = os.urandom
+    written = 0
+    with open(path, "wb") as f:
+        while written < size:
+            n = min(chunk, size - written)
+            f.write(gen(n))
+            written += n
+
+
+def _cli_compress_file(base_cmd: list[str], src: Path, dst: Path, tool: str,
+                       out_flag: bool) -> None:
+    if which(base_cmd[0]) is None:
+        raise Unavailable(f"{tool} unavailable (no module and no '{base_cmd[0]}' CLI)")
+    cmd = list(base_cmd)
+    cmd += [str(dst), str(src)] if out_flag else [str(src), str(dst)]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
+
+
+def _compress_file_stream(src: Path, dst: Path, fmt_key: str,
+                          chunk: int = 8 * 1024 * 1024) -> None:
+    """Stream-compress `src` -> `dst` with single-stream codec `fmt_key`.
+
+    Memory-bounded (chunked). Prefers a Python module; falls back to a CLI tool
+    for zst/lz4/br; raises Unavailable if neither is present. Low/fast settings.
+    """
+    if fmt_key == "gz":
+        with open(src, "rb") as i, gzip.open(dst, "wb", compresslevel=1) as o:
+            shutil.copyfileobj(i, o, chunk)
+    elif fmt_key == "bz2":
+        with open(src, "rb") as i, bz2.open(dst, "wb", compresslevel=1) as o:
+            shutil.copyfileobj(i, o, chunk)
+    elif fmt_key == "xz":
+        with open(src, "rb") as i, lzma.open(dst, "wb", preset=0) as o:
+            shutil.copyfileobj(i, o, chunk)
+    elif fmt_key == "zst":
+        mod = load_module("zstandard", "zstandard")
+        if mod is not None:
+            with open(src, "rb") as i, open(dst, "wb") as o:
+                mod.ZstdCompressor(level=3).copy_stream(
+                    i, o, read_size=chunk, write_size=chunk)
+        else:
+            _cli_compress_file(["zstd", "-q", "-1", "-f", "-o"], src, dst,
+                               "zstd", out_flag=True)
+    elif fmt_key == "lz4":
+        mod = load_module("lz4.frame", "lz4")
+        if mod is not None:
+            with open(src, "rb") as i, mod.LZ4FrameFile(str(dst), "wb") as o:
+                shutil.copyfileobj(i, o, chunk)
+        else:
+            _cli_compress_file(["lz4", "-q", "-1", "-f", "-z"], src, dst,
+                               "lz4", out_flag=False)
+    elif fmt_key == "br":
+        mod = load_module("brotli", "brotli")
+        if mod is not None:
+            comp = mod.Compressor(quality=1)
+            with open(src, "rb") as i, open(dst, "wb") as o:
+                while True:
+                    block = i.read(chunk)
+                    if not block:
+                        break
+                    o.write(comp.process(block))
+                o.write(comp.finish())
+        else:
+            _cli_compress_file(["brotli", "-q", "1", "-f", "-o"], src, dst,
+                               "brotli", out_flag=True)
+    else:
+        raise ValueError(f"unknown single-stream codec '{fmt_key}'")
+
+
+def _build_large_7z(dst: Path, staged: list[tuple[str, Path]]) -> None:
+    py7zr = load_module("py7zr", "py7zr")
+    if py7zr is None:
+        raise Unavailable("py7zr unavailable (pip install py7zr)")
+    # Store (no compression) so building a large 7z of random data stays fast;
+    # fall back to py7zr's default LZMA2 if this build doesn't accept FILTER_COPY.
+    try:
+        z = py7zr.SevenZipFile(dst, "w", filters=[{"id": py7zr.FILTER_COPY}])
+    except Exception:  # noqa: BLE001 - older/edge py7zr without FILTER_COPY
+        z = py7zr.SevenZipFile(dst, "w")
+    with z:
+        for arc, p in staged:
+            z.write(str(p), arcname=arc)
+
+
+def gen_large(out: Path, token: str, total_size: int, nfiles: int) -> int:
+    """Create one large archive of `token` format. Returns a process exit code."""
+    norm = normalize_large_token(token)
+    if norm not in LARGE_FORMATS:
+        print(f"error: unknown --large format '{token}'.")
+        print(f"  supported: {', '.join(sorted(LARGE_FORMATS))}")
+        return 2
+
+    fname, kind, codec = LARGE_FORMATS[norm]
+    if kind == "single":
+        nfiles = 1  # single-stream formats are one file by definition
+    nfiles = max(1, nfiles)
+
+    out.mkdir(parents=True, exist_ok=True)
+    dst = out / fname
+    print(f"Generating large {norm} archive -> {dst}")
+    print(f"  target uncompressed: {_human(total_size)} across {nfiles} file(s)")
+
+    per = total_size // nfiles
+    sizes = [per] * nfiles
+    sizes[-1] += total_size - per * nfiles  # remainder into the last file
+
+    with tempfile.TemporaryDirectory() as td:
+        staging = Path(td)
+        staged: list[tuple[str, Path]] = []  # (arcname, on-disk path)
+        for idx, sz in enumerate(sizes):
+            arc = (f"large/part{idx:03d}.bin" if nfiles > 1
+                   else "large-payload.bin")
+            p = staging / f"part{idx:03d}.bin"
+            print(f"  writing {arc} ({_human(sz)}) ...", flush=True)
+            _fill_random_file(p, sz, seed=0xA11CE + idx)
+            staged.append((arc, p))
+
+        print(f"  packing {kind} archive ...", flush=True)
+        try:
+            if kind == "zip":
+                # DEFLATE level 1 keeps it fast on random data; Zip64 auto-on.
+                with zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_DEFLATED,
+                                     compresslevel=1, allowZip64=True) as zf:
+                    for arc, p in staged:
+                        zf.write(p, arcname=arc)
+            elif kind == "tar":
+                with tarfile.open(dst, "w") as tf:  # uncompressed tar
+                    for arc, p in staged:
+                        tf.add(str(p), arcname=arc)
+            elif kind == "7z":
+                _build_large_7z(dst, staged)
+            elif kind == "compound":
+                # Stream a plain tar to a temp file, then single-stream compress.
+                tmp_tar = staging / "_large.tar"
+                with tarfile.open(tmp_tar, "w") as tf:
+                    for arc, p in staged:
+                        tf.add(str(p), arcname=arc)
+                _compress_file_stream(tmp_tar, dst, codec)
+            elif kind == "single":
+                _compress_file_stream(staged[0][1], dst, codec)
+            else:  # pragma: no cover - guarded by LARGE_FORMATS
+                raise ValueError(kind)
+        except (Unavailable, subprocess.CalledProcessError, OSError) as e:
+            print(f"error: could not build large {norm} archive: {e}")
+            if dst.exists():
+                dst.unlink()
+            return 1
+
+    archive_size = dst.stat().st_size
+    print(f"\nDone. Wrote {dst}")
+    print(f"  archive on disk : {_human(archive_size)}")
+    print(f"  uncompressed    : {_human(total_size)}")
+    print("  (not in manifest.json -- standalone asset for manual/perf testing)")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 
@@ -802,9 +1040,33 @@ def main() -> int:
                         help=f"password for encrypted assets (default: {DEFAULT_PASSWORD})")
     parser.add_argument("--list", action="store_true",
                         help="list what would be generated and exit")
+    parser.add_argument("--large", metavar="FORMAT",
+                        help="create ONE large archive of FORMAT (e.g. zip, 7z, "
+                             "tar, tar.gz, tgz, tar.xz, gz, xz, zst, lz4, br) for "
+                             "manual/perf testing, then exit. Streamed; NOT added "
+                             "to manifest.json.")
+    parser.add_argument("--large-size", default="256M",
+                        help="uncompressed size for --large (e.g. 512M, 2G, 5G; "
+                             "default 256M). >4G exercises Zip64 / 64-bit counters.")
+    parser.add_argument("--large-files", type=int, default=4,
+                        help="number of inner files for --large containers/"
+                             "compound (default 4; single-stream is always 1)")
     args = parser.parse_args()
 
     ALLOW_INSTALL = not args.no_install
+
+    # --large is a standalone mode: build just the one big archive and exit,
+    # without touching the corpus or its manifest.
+    if args.large:
+        try:
+            size = parse_size(args.large_size)
+        except ValueError:
+            print(f"error: invalid --large-size '{args.large_size}'")
+            return 2
+        if size <= 0:
+            print("error: --large-size must be positive")
+            return 2
+        return gen_large(args.out, args.large, size, args.large_files)
 
     if args.list:
         print("Containers x structures: zip, tar, 7z, rar  x  "
@@ -817,6 +1079,7 @@ def main() -> int:
               "7z-aes-header, rar-aes, rar-aes-header")
         print("Edge cases:              empty, single-empty-folder, macosx, "
               "nested, zip-slip, illegal-names, multivolume")
+        print("Large (--large FORMAT):  " + ", ".join(sorted(LARGE_FORMATS)))
         return 0
 
     out = args.out

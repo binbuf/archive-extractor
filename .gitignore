@@ -22,6 +22,10 @@ CMakeUserPresets.json
 # Generated test assets (produced by scripts/gen-test-assets.py)
 /tests/assets/
 
+# Python cache (scripts/)
+__pycache__/
+*.pyc
+
 # Misc
 *.obj
 *.exe
