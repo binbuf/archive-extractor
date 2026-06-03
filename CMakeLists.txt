@@ -62,9 +62,13 @@ target_link_libraries(archive_core PRIVATE LibArchive::LibArchive ole32)
 # ---------------------------------------------------------------------------
 add_executable(ArchiveExtractor WIN32
   src/app/main.cpp
+  src/app/progress_dialog.cpp
   src/app/app.manifest
 )
-target_link_libraries(ArchiveExtractor PRIVATE archive_core ole32 user32 shell32)
+# comctl32: themed progress bar / button (v6 via the manifest).
+# shlwapi: PathFindFileNameW for the archive label.
+target_link_libraries(ArchiveExtractor PRIVATE
+  archive_core ole32 user32 shell32 comctl32 shlwapi)
 # wWinMain (wide entry) requires the wide CRT startup under /SUBSYSTEM:WINDOWS.
 target_link_options(ArchiveExtractor PRIVATE /ENTRY:wWinMainCRTStartup)
 

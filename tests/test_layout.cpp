@@ -179,6 +179,17 @@ TEST(Layout, MultiFilesWrappedInStem) {
               (fs::path(work.path()) / L"zip__multi-files").wstring());
 }
 
+TEST(Layout, WrappedFolderIsNotHidden) {
+    // The 2+-entry path renames the hidden staging dir into place; the placed
+    // wrapper folder must end up a normal, visible folder (no hidden/system).
+    ScopedTempDir work;
+    const auto r = ExtractAndPlace("zip__multi-files.zip", work.path());
+    ASSERT_EQ(r.status, PlaceStatus::Ok);
+    const DWORD attr = GetFileAttributesW(r.placedPath.c_str());
+    ASSERT_NE(attr, INVALID_FILE_ATTRIBUTES);
+    EXPECT_EQ(attr & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM), 0u);
+}
+
 TEST(Layout, MultiFoldersWrappedInStem) {
     ScopedTempDir work;
     const auto r = ExtractAndPlace("zip__multi-folders.zip", work.path());

@@ -214,6 +214,18 @@ PlaceResult LayoutPlanner::place(std::wstring_view stagingDir,
     //   nothing left to remove.
     if (singleEntry) {
         RemoveDirTree(staging);
+    } else {
+        // The 2+-entry path renames the HIDDEN staging dir into place, so the
+        // placed wrapper folder would otherwise inherit the hidden/system bits.
+        // Clear them so the result is a normal, visible folder.
+        const std::wstring t = ToExtendedPath(target);
+        const DWORD attr = GetFileAttributesW(t.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES &&
+            (attr & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))) {
+            SetFileAttributesW(
+                t.c_str(),
+                attr & ~(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM));
+        }
     }
 
     if (renamed) {

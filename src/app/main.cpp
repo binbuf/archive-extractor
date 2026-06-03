@@ -1,6 +1,7 @@
 #include "archive_core/cli.h"
 #include "archive_core/logging.h"
 #include "archive_core/paths.h"
+#include "progress_dialog.h"
 
 #include <cstdio>
 #include <format>
@@ -54,7 +55,7 @@ void AttachParentConsole() {
     }
 }
 
-int RunExtract(const ae::CommandLine& cl) {
+int RunExtract(const ae::CommandLine& cl, HINSTANCE hInstance) {
     if (!ae::PathExists(cl.archivePath)) {
         ae::Log(std::format(L"[error] file not found: {}", cl.archivePath));
         ShowError(std::format(L"File not found:\n{}", cl.archivePath));
@@ -69,13 +70,34 @@ int RunExtract(const ae::CommandLine& cl) {
     const std::wstring workingDir = ae::ParentDirectory(cl.archivePath);
     ae::Log(std::format(L"[extract] archive     : {}", cl.archivePath));
     ae::Log(std::format(L"[extract] working dir : {}", workingDir));
-    ae::Log(L"[extract] (real extraction lands in later tasks)");
-    return 0;
+
+    // Run the full flow (detect -> stage+extract -> place -> reveal stub)
+    // behind the progress dialog. All extraction work happens on a worker
+    // thread; this call pumps the UI loop and returns when the window closes.
+    const ae::DialogResult dr =
+        ae::RunExtractionDialog(cl.archivePath, hInstance);
+
+    switch (dr.outcome) {
+        case ae::DialogOutcome::Success:
+            ae::Log(L"[extract] done");
+            return 0;
+        case ae::DialogOutcome::Cancelled:
+            ae::Log(L"[extract] cancelled by user");
+            return 0;  // user cancellation is not an error exit
+        case ae::DialogOutcome::Failed:
+        default:
+            ae::Log(std::format(L"[extract] failed: {}", dr.errorMessage));
+            // Placeholder error UI until task 06 supplies the real dialog.
+            ShowError(dr.errorMessage.empty()
+                          ? std::wstring(L"Extraction failed.")
+                          : dr.errorMessage);
+            return 4;
+    }
 }
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     AttachParentConsole();
 
     const HRESULT hr =
@@ -100,7 +122,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             exitCode = 0;
             break;
         case ae::Mode::Extract:
-            exitCode = RunExtract(cl);
+            exitCode = RunExtract(cl, hInstance);
             break;
         case ae::Mode::None:
         default:
