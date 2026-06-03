@@ -4,15 +4,15 @@
 
 <img src="docs/screen.gif" width="640" alt="Archive Extractor in action">
 
-Archive Extractor is a tiny, native **Win32 (C++20)** application that brings the feel of the macOS Archive Utility to Windows. It registers itself as a file handler, so opening a supported archive is instant and just works.
+Archive Extractor is a tiny, native Windows **Win32 (C++20)** application to extract pretty much any popular archive instantly.
 
 ## Features
 
-- **One click.** Double-click an archive — a small centered progress dialog appears, then disappears when done.
-- **Smart placement.** Extracts into a sensibly named folder, and avoids clutter when an archive already has a single top-level folder.
+- **One click.** After initial file extension association, just double-click your archive and it extracts immediately.
+- **Smart placement.** Extracts into a sensibly named folder
 - **Reveal & select.** When finished, Explorer opens with the new items pre-selected.
 - **Passwords.** Prompts for a password on encrypted ZIP, 7z (including header-encrypted), and RAR/RAR5.
-- **Zero runtime deps.** Statically linked — no VC++ redistributable, no installer prerequisites.
+- **Zero runtime deps.** Statically linked, no VC++ redistributable, no installer prerequisites, blazingly fast.
 
 ### Supported formats
 
@@ -26,8 +26,6 @@ Archive Extractor is a tiny, native **Win32 (C++20)** application that brings th
 Powered by **libarchive** (zlib/bzip2/lzma/lz4/zstd/openssl), **bit7z/7z.dll** for
 encrypted 7z and RAR, and **brotli** for `.br`.
 
-
-
 ## Releases
 
 Pre-built binaries are published on the
@@ -35,8 +33,7 @@ Pre-built binaries are published on the
 
 ## Build from source
 
-The repo ships a one-stop PowerShell helper, **`scripts/build.ps1`**, that sets up
-the toolchain, builds, and runs the tests.
+The repo ships a PowerShell script, **`scripts/build.ps1`**, that sets up the toolchain, builds, and runs the tests.
 
 ### 1. Prerequisites
 
@@ -79,12 +76,7 @@ The executable lands at `build\x64-release\ArchiveExtractor.exe` (or `x64-debug`
 ```powershell
 .\scripts\build.ps1 -Release -Install   # build release, then make it the handler
 .\scripts\build.ps1 -Uninstall          # remove file associations
-```
-
-For already-claimed types like `.zip`, set the default with the Windows picker:
-
-```powershell
-build\x64-release\ArchiveExtractor.exe --set-default <file>
+.\scripts\build.ps1 -Clean -Uninstall   # rollback to fresh
 ```
 
 See [`BUILD.md`](BUILD.md) for the raw CMake commands and CI notes, and
