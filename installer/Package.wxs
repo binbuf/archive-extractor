@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Archive Extractor — per-machine x64 MSI (task 13).
+
+  Lays down ArchiveExtractor.exe + 7z.dll under Program Files, then performs the
+  shell registration by invoking the SAME CLI the app exposes (the register and
+  unregister verbs, task 08) as deferred custom actions, so the installer and the
+  app never drift on the key set. SHChangeNotify(SHCNE_ASSOCCHANGED) is broadcast
+  by Register()/Unregister() themselves, so the shell refreshes automatically.
+
+  Build-time preprocessor variables (set via `wix build -d ...`):
+    BuildDir  — directory holding the built ArchiveExtractor.exe and 7z.dll
+    Version   — product version (e.g. 1.2.3), normally derived from the git tag
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Archive Extractor"
+           Manufacturer="binbuf"
+           Version="$(var.Version)"
+           UpgradeCode="7E6F4C2A-1B3D-4E5F-9A8B-0C1D2E3F4A5B"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <!-- Clean replace on reinstall/upgrade: no orphaned keys or dup files. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Archive Extractor is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon.exe" SourceFile="$(var.BuildDir)\ArchiveExtractor.exe" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.exe" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/binbuf/archive-extractor" />
+
+    <!-- Payload: the exe + the on-demand 7z.dll, in Program Files (x64). -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Archive Extractor">
+        <Component Id="MainExe" Guid="*">
+          <File Id="ArchiveExtractorExe"
+                Source="$(var.BuildDir)\ArchiveExtractor.exe"
+                KeyPath="yes" />
+        </Component>
+        <Component Id="SevenZipDll" Guid="*">
+          <File Id="SevenZipDll" Source="$(var.BuildDir)\7z.dll" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Archive Extractor" Level="1">
+      <ComponentRef Id="MainExe" />
+      <ComponentRef Id="SevenZipDll" />
+    </Feature>
+
+    <!--
+      Shell registration via the app's own CLI (single source of truth, task 08).
+      Deferred + Impersonate="no" so the HKLM writes run elevated (as SYSTEM).
+    -->
+    <CustomAction Id="RegisterAssoc"
+                  FileRef="ArchiveExtractorExe"
+                  ExeCommand="--register"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+    <CustomAction Id="UnregisterAssoc"
+                  FileRef="ArchiveExtractorExe"
+                  ExeCommand="--unregister"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Register on install/upgrade-install (REMOVE is empty then). -->
+      <Custom Action="RegisterAssoc" After="InstallFiles"
+              Condition="NOT REMOVE" />
+      <!--
+        Unregister on a real uninstall only. During a major upgrade the OLD
+        product is removed with UPGRADINGPRODUCTCODE set; skipping it there keeps
+        the freshly-registered associations from the new product intact.
+      -->
+      <Custom Action="UnregisterAssoc" Before="RemoveFiles"
+              Condition="REMOVE AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

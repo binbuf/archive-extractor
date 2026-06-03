@@ -47,6 +47,7 @@ add_library(archive_core STATIC
   src/core/extract.cpp
   src/core/sevenzip.cpp
   src/core/brotli.cpp
+  src/core/sanitize.cpp
   src/core/layout.cpp
   src/core/retry.cpp
   src/core/error_model.cpp
@@ -123,6 +124,7 @@ add_executable(ArchiveExtractor WIN32
   src/app/main.cpp
   src/app/progress_dialog.cpp
   src/app/password_dialog.cpp
+  src/app/link_dialog.cpp
   src/app/error_dialog.cpp
   src/app/shell_reveal.cpp
   src/app/app.manifest
@@ -159,6 +161,7 @@ add_executable(archive_core_tests
   tests/test_layout.cpp
   tests/test_error_model.cpp
   tests/test_registration.cpp
+  tests/test_edge_cases.cpp
 )
 target_link_libraries(archive_core_tests PRIVATE archive_core GTest::gtest GTest::gtest_main)
 # Real header fixtures live in the generated corpus under tests/assets. Tests

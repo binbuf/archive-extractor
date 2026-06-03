@@ -6,6 +6,7 @@
 #include "archive_core/layout.h"
 #include "archive_core/logging.h"
 #include "archive_core/paths.h"
+#include "link_dialog.h"
 #include "password_dialog.h"
 #include "shell_reveal.h"
 
@@ -36,6 +37,9 @@ constexpr UINT WM_APP_DONE = WM_APP + 2;
 // Worker needs a password. The worker fills DialogState::pw* and blocks on
 // pwEvent; the UI thread shows the modal prompt and signals the event back.
 constexpr UINT WM_APP_PASSWORD = WM_APP + 3;
+// Worker hit the first link entry. The worker blocks on linkEvent; the UI thread
+// shows the one-time Copy/Skip prompt and signals the choice back.
+constexpr UINT WM_APP_LINKS = WM_APP + 4;
 
 // Flash-suppression threshold. Extractions that finish faster than this never
 // show the window, avoiding a flicker on trivial archives. Chosen at 200 ms per
@@ -97,6 +101,10 @@ struct DialogState {
     bool pwCancelled = false;
     std::wstring pwResult;
     bool passwordResolved = false;  // a password was accepted at least once
+
+    // --- Link prompt handoff (worker blocks; UI answers, one-time) ---------
+    HANDLE linkEvent = nullptr;
+    LinkPolicy linkChoice = LinkPolicy::Skip;
 
     UINT dpi = 96;
     DialogResult result;  // filled on completion; returned by the run loop
@@ -292,7 +300,14 @@ void WorkerFlow(DialogState* st) {
     // --- Staging dir (03) --------------------------------------------------
     const std::wstring stagingDir = CreateStagingDir(workingDir);
     if (stagingDir.empty()) {
-        fail(ErrorCode::Internal, plan.format, L"CreateStagingDir failed");
+        // A read-only / permission-denied destination (design 07 §14) surfaces
+        // here as the staging dir cannot be created. Refine the Win32 error so
+        // the user sees "You don't have permission to write to this folder."
+        const DWORD e = GetLastError();
+        const ErrorCode code =
+            RefineWin32WriteError(e, ErrorCode::Internal);
+        fail(code, plan.format,
+             std::format(L"CreateStagingDir failed (err {})", e));
         return;
     }
 
@@ -326,6 +341,14 @@ void WorkerFlow(DialogState* st) {
             st->pwResult.clear();
         }
         return pw;
+    };
+    // Link policy hook: block the worker on a one-time handoff to the UI thread,
+    // which shows the Copy/Skip prompt (design 07 §6). The engine caches the
+    // answer and applies it to every link.
+    cb.requestLinkPolicy = [st]() -> LinkPolicy {
+        PostMessageW(st->hwnd, WM_APP_LINKS, 0, 0);
+        WaitForSingleObject(st->linkEvent, INFINITE);
+        return st->linkChoice;
     };
 
     LibarchiveExtractor libExtractor;
@@ -495,6 +518,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_APP_LINKS: {
+            // Worker is blocked on the first link. Show the one-time Copy/Skip
+            // prompt on the UI thread and signal the choice back via linkEvent.
+            if (st && !st->finished) {
+                const bool wasHidden = !st->shown;
+                if (wasHidden) KillTimer(hwnd, kShowTimerId);
+                st->linkChoice = ShowLinkDialog(st->fileName, hwnd, st->hInst);
+                if (wasHidden && !st->shown) {
+                    SetTimer(hwnd, kShowTimerId, kFlashSuppressMs, nullptr);
+                }
+            } else {
+                st->linkChoice = LinkPolicy::Skip;
+            }
+            if (st) SetEvent(st->linkEvent);
+            return 0;
+        }
+
         case WM_APP_DONE: {
             std::unique_ptr<WorkerResult> wr(
                 reinterpret_cast<WorkerResult*>(lParam));
@@ -587,8 +627,9 @@ DialogResult RunExtractionDialog(const std::wstring& archivePath,
     DialogState st;
     st.archivePath = archivePath;
     st.fileName = PathFindFileNameW(archivePath.c_str());
-    // Auto-reset event for the worker<->UI password handoff.
+    // Auto-reset events for the worker<->UI password and link handoffs.
     st.pwEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    st.linkEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
     // No min/max box; a thin tool-window-ish frame. WS_EX_DLGMODALFRAME for a
     // clean dialog border; not actually modal (own message loop, modeless).
@@ -599,6 +640,7 @@ DialogResult RunExtractionDialog(const std::wstring& archivePath,
         CW_USEDEFAULT, CW_USEDEFAULT, nullptr, nullptr, inst, &st);
     if (!hwnd) {
         if (st.pwEvent) CloseHandle(st.pwEvent);
+        if (st.linkEvent) CloseHandle(st.linkEvent);
         DialogResult r;
         r.outcome = DialogOutcome::Failed;
         r.error = MakeError(ErrorCode::Internal, st.fileName);
@@ -625,6 +667,7 @@ DialogResult RunExtractionDialog(const std::wstring& archivePath,
     if (st.worker.joinable()) st.worker.join();
 
     if (st.pwEvent) CloseHandle(st.pwEvent);
+    if (st.linkEvent) CloseHandle(st.linkEvent);
 
     return st.result;
 }

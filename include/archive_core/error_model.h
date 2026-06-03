@@ -30,6 +30,7 @@ enum class ErrorCode {
     Encryption,      // an encrypted entry an engine cannot decrypt (exotic cipher)
     NeedPassword,    // an encrypted entry was hit and no password was supplied
     DiskFull,        // out of disk space mid-extract (ERROR_DISK_FULL)
+    TooLarge,        // aborted by the decompression-bomb guard (design 07 §15)
     AccessDenied,    // no write permission in the working dir (ERROR_ACCESS_DENIED)
     PathTooLong,     // a path exceeded limits even with \\?\ (ERROR_*_NAME_*)
     FileInUse,       // destination locked even after retry-with-backoff

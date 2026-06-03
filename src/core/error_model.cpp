@@ -35,6 +35,10 @@ std::wstring ErrorMessageFor(ErrorCode code, std::wstring_view archiveName) {
             return couldnt(L"It is password protected.");
         case ErrorCode::DiskFull:
             return couldnt(L"There isn't enough disk space.");
+        case ErrorCode::TooLarge:
+            return couldnt(
+                L"It would expand to an unexpectedly huge size (it may be a "
+                L"decompression bomb).");
         case ErrorCode::AccessDenied:
             return couldnt(L"You don't have permission to write to this folder.");
         case ErrorCode::PathTooLong:
@@ -64,6 +68,7 @@ const wchar_t* ErrorCodeToken(ErrorCode code) {
         case ErrorCode::Encryption:   return L"ENCRYPTION";
         case ErrorCode::NeedPassword: return L"NEED_PASSWORD";
         case ErrorCode::DiskFull:     return L"DISK_FULL";
+        case ErrorCode::TooLarge:     return L"TOO_LARGE";
         case ErrorCode::AccessDenied: return L"ACCESS_DENIED";
         case ErrorCode::PathTooLong:  return L"PATH_TOO_LONG";
         case ErrorCode::FileInUse:    return L"FILE_IN_USE";
@@ -128,6 +133,8 @@ ErrorCode ErrorCodeFromExtract(ExtractStatus status, unsigned long lastError) {
             return RefineWin32WriteError(lastError, ErrorCode::WriteFailed);
         case ExtractStatus::NeedPassword:
             return ErrorCode::NeedPassword;
+        case ExtractStatus::TooLarge:
+            return ErrorCode::TooLarge;
         case ExtractStatus::Unsupported:
             return ErrorCode::Unsupported;
     }

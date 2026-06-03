@@ -89,3 +89,35 @@ robust on real-world archives.
 - The symlink prompt, like the password prompt, must hand off from worker to UI
   without deadlocking the pump (one-time, then cached choice).
 - Keep sanitization deterministic so duplicate/case-collision renames are stable.
+
+## Implementation status (done)
+- **Sanitizer + collision/duplicate registry:** `src/core/sanitize.cpp`
+  (`include/archive_core/sanitize.h`) — pure, Win32-free. Reserved device names
+  (`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`/`CONIN$`/`CONOUT$`) → `_` suffix;
+  invalid chars + control → `_`; trailing dot/space stripped; never-empty.
+  `InnerNameRegistry` resolves case-only collisions (auto-rename `name (1)`,
+  newcomer keeps its own case) and exact duplicates (last-wins). Wired into the
+  libarchive path in `extract.cpp` (zip/tar fixtures route here).
+- **Links:** one-time `LinkPolicy` Copy/Skip via `ExtractCallbacks::requestLinkPolicy`
+  (default **Skip** when headless). Copy materializes a copy of the in-archive
+  target's contents after the main pass; absolute/external/`..`-escaping/missing
+  targets skip + log. GUI prompt: `src/app/link_dialog.cpp` (TaskDialog), handed
+  off worker→UI like the password prompt (`WM_APP_LINKS`).
+- **Encoding:** zip `hdrcharset` fallback now the system **OEM** code page
+  (`CP<GetOEMCP()>`) instead of forcing UTF-8 (bit-11 UTF-8 names still honored).
+- **Bomb guard:** pure `EvaluateBombGuard` (ratio past a 256 MiB floor, or output
+  within 64 MiB of free space). Engine warns+logs on a trip and continues unless
+  `ExtractCallbacks::confirmLargeExtraction` declines → `ExtractStatus::TooLarge`
+  / `ErrorCode::TooLarge`. Disk-full remains the backstop. (No interactive GUI
+  bomb prompt in v1 — log + continue; a prompt is a noted enhancement.)
+- **Source quirks:** read-only destination now maps `CreateStagingDir` failure
+  through `RefineWin32WriteError` → `AccessDenied` ("permission to write to this
+  folder"). AV-lock retry was **already** handled (`RenameMove` →
+  `RetryWithBackoff`). UNC same-share staging already works via `SameVolume`.
+- **Launch args:** multiple paths → one-process-per-path (`CommandLine::extraPaths`
+  + `SpawnExtraInstances` in `main.cpp`); unsupported extension explicitly opened
+  → content-sniff via `DetectFile` before refusing; no-arg/no-longer-exists
+  already handled.
+- **Tests:** `tests/test_edge_cases.cpp` (sanitizer, registry, bomb guard,
+  illegal-names, duplicate-path, macOS cruft, links Copy+Skip, launch-arg
+  parsing). Full suite green (165 tests; RAR-only tests self-skip).

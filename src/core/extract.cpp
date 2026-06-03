@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -18,13 +19,9 @@
 #include <archive_entry.h>
 
 #include "archive_core/logging.h"
+#include "archive_core/sanitize.h"
 
 namespace ae {
-
-// Baseline inner-name sanitization hook (defined below). Reserved-name /
-// invalid-char / trailing-dot handling is completed in task 12; for now this is
-// a near pass-through so the hook exists at the right place in the flow.
-std::wstring SanitizeInnerName(std::wstring_view name);
 
 namespace {
 
@@ -194,9 +191,10 @@ bool SanitizeEntryPath(std::wstring_view entryPath, std::wstring& outRelative) {
                 stack.pop_back();
                 continue;
             }
-            // Inner-name sanitization hook (reserved names / invalid chars):
-            // baseline pass-through; full handling is task 12.
-            stack.push_back(SanitizeInnerName(seg));
+            // Inner-name sanitization: reserved device names, invalid chars,
+            // trailing dot/space (design 07 §9). Case-collision / duplicate
+            // resolution happens once the full relative path is known (below).
+            stack.push_back(SanitizeInnerSegment(seg));
         }
     }
     if (stack.empty()) return false;
@@ -343,13 +341,88 @@ ExtractResult Fail(ExtractStatus st, std::wstring msg) {
 
 }  // namespace
 
-// Baseline inner-name sanitization. For task 03 this is a near pass-through
-// hook; reserved-name / invalid-char / trailing-dot handling is completed in
-// task 12. We do strip trailing dots/spaces on the LAST segment only at the
-// caller layer; here we leave the name intact to keep the hook minimal.
-std::wstring SanitizeInnerName(std::wstring_view name) {
-    return std::wstring(name);
+namespace {
+
+// Free bytes available on the volume that contains `path` (the staging dir).
+// Returns 0 when it cannot be determined (the bomb guard then skips the
+// free-space check; the disk-full path remains the backstop).
+std::uint64_t FreeBytesOnVolume(std::wstring_view path) {
+    ULARGE_INTEGER freeForCaller{};
+    if (GetDiskFreeSpaceExW(ToExtendedPath(path).c_str(), &freeForCaller, nullptr,
+                            nullptr)) {
+        return freeForCaller.QuadPart;
+    }
+    return 0;
 }
+
+bool IsRegularFileOnDisk(std::wstring_view normalPath) {
+    const DWORD attr = GetFileAttributesW(ToExtendedPath(normalPath).c_str());
+    return attr != INVALID_FILE_ATTRIBUTES &&
+           !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// A link entry deferred for the Copy policy: its own (sanitized) staging-relative
+// destination, the raw in-archive target name, and whether it is a symlink (vs a
+// hardlink, whose target is interpreted relative to the archive root).
+struct PendingLink {
+    std::wstring destRel;   // sanitized backslash-relative path of the link itself
+    std::wstring linkName;  // raw target as stored in the archive
+    bool isSymlink = false;
+};
+
+// Resolve a target relative path, collapsing "."/".." against the link's base
+// directory. Returns false if the target is absolute (drive/UNC/leading sep) or
+// escapes the staging root — those are "external" targets we cannot copy.
+bool ResolveLinkTargetRel(const PendingLink& link, std::wstring& outRel) {
+    std::wstring t = NormalizeSeparators(link.linkName);
+    if (t.empty()) return false;
+    if (IsSeparator(t.front())) return false;             // absolute (leading sep)
+    if (t.size() >= 2 && t[1] == L':') return false;      // drive-letter absolute
+    if (t.rfind(L"\\\\", 0) == 0) return false;           // UNC
+
+    // Symlink targets are relative to the link's own directory; hardlink targets
+    // are interpreted relative to the archive root.
+    std::vector<std::wstring> stack;
+    if (link.isSymlink) {
+        const std::size_t sep = link.destRel.find_last_of(L'\\');
+        if (sep != std::wstring::npos) {
+            std::wstring base = link.destRel.substr(0, sep);
+            std::size_t s = 0;
+            for (std::size_t i = 0; i <= base.size(); ++i) {
+                if (i == base.size() || base[i] == L'\\') {
+                    if (i > s) stack.push_back(base.substr(s, i - s));
+                    s = i + 1;
+                }
+            }
+        }
+    }
+
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= t.size(); ++i) {
+        if (i == t.size() || t[i] == L'\\') {
+            std::wstring seg = t.substr(start, i - start);
+            start = i + 1;
+            if (seg.empty() || seg == L".") continue;
+            if (seg == L"..") {
+                if (stack.empty()) return false;  // escapes the root
+                stack.pop_back();
+                continue;
+            }
+            stack.push_back(SanitizeInnerSegment(seg));
+        }
+    }
+    if (stack.empty()) return false;
+
+    std::wstring rel;
+    for (std::size_t i = 0; i < stack.size(); ++i) {
+        if (i) rel.push_back(L'\\');
+        rel.append(stack[i]);
+    }
+    outRel = std::move(rel);
+    return true;
+}
+
+}  // namespace
 
 ExtractResult LibarchiveExtractor::extractToStaging(
     const PipelinePlan& plan, std::wstring_view sourcePath,
@@ -382,10 +455,16 @@ ExtractResult LibarchiveExtractor::extractToStaging(
         archive_read_support_format_all(a);
     }
 
-    // Honor the zip UTF-8 flag with an OEM/ANSI fallback heuristic: ask
-    // libarchive to interpret non-UTF-8 zip names via the active code page.
-    // (libarchive reads bit 11 itself; hdrcharset steers the fallback.)
-    archive_read_set_option(a, "zip", "hdrcharset", "UTF-8");
+    // Filename encoding (design 07 §8). libarchive reads zip general-purpose
+    // bit 11 itself: names flagged UTF-8 are decoded as UTF-8 regardless. For
+    // the UNFLAGGED legacy case we steer the fallback to the system OEM code
+    // page (CP437/CP850/... — what most legacy zip writers used) instead of
+    // assuming UTF-8, so non-ASCII legacy names decode without mojibake. 7z/RAR
+    // carry UTF-16/UTF-8 names and ignore this. ASCII names are codepage-
+    // invariant, so common archives are unaffected either way.
+    char oemCharset[16];
+    _snprintf_s(oemCharset, sizeof(oemCharset), _TRUNCATE, "CP%u", GetOEMCP());
+    archive_read_set_option(a, "zip", "hdrcharset", oemCharset);
 
     // Password hook: register the passphrase callback so libarchive solicits a
     // password (with retry/cap/cancel) the moment it reaches an encrypted entry.
@@ -420,6 +499,18 @@ ExtractResult LibarchiveExtractor::extractToStaging(
     std::uint64_t bytesWritten = 0;
 
     const std::wstring stagingRoot = NormalizeSeparators(stagingDir);
+
+    // Case-collision / duplicate-path resolver for inner names (design 07 §9).
+    InnerNameRegistry nameRegistry;
+    // Link policy: solicited once on the first link, then cached. Copy-policy
+    // links are deferred and materialized after the main pass (their targets may
+    // be entries that appear later in the stream).
+    std::optional<LinkPolicy> linkPolicy;
+    std::vector<PendingLink> pendingLinks;
+    // Decompression-bomb guard: ask the confirm hook once; cache the decision.
+    bool bombDecided = false;
+    bool bombContinue = true;
+    std::uint64_t lastBombCheckBytes = 0;
 
     struct archive_entry* entry = nullptr;
     int r;
@@ -468,10 +559,49 @@ ExtractResult LibarchiveExtractor::extractToStaging(
                             archive_entry_hardlink(entry) != nullptr;
 
         if (isLink) {
-            // Detect + skip + log (full copy/skip prompt is task 12).
+            // First link: solicit the one-time Copy/Skip choice (design 07 §6).
+            // No callback -> Skip (the safe, no-privilege default).
             result.hadLinks = true;
-            ++result.entriesSkipped;
-            Log(L"skipping link entry: " + entryName);
+            if (!linkPolicy) {
+                linkPolicy = callbacks.requestLinkPolicy
+                                 ? callbacks.requestLinkPolicy()
+                                 : LinkPolicy::Skip;
+                Log(*linkPolicy == LinkPolicy::Copy
+                        ? L"links present: copying link targets"
+                        : L"links present: skipping links");
+            }
+            if (*linkPolicy == LinkPolicy::Skip) {
+                ++result.entriesSkipped;
+                Log(L"skipping link entry: " + entryName);
+                continue;
+            }
+            // Copy policy: defer. Sanitize the link's OWN path now; an unsafe
+            // path (zip-slip) is skipped + logged rather than failing the set.
+            std::wstring linkRel;
+            if (!SanitizeEntryPath(entryName, linkRel)) {
+                ++result.entriesSkipped;
+                Log(L"skipping link with unsafe path: " + entryName);
+                continue;
+            }
+            InnerNameRegistry::Disposition disp;
+            linkRel = nameRegistry.Resolve(linkRel, /*isDir=*/false, disp);
+            PendingLink pl;
+            pl.destRel = linkRel;
+            const wchar_t* sw = archive_entry_symlink_w(entry);
+            const char* sa = archive_entry_symlink(entry);
+            if (sw && *sw) {
+                pl.linkName = sw;
+                pl.isSymlink = true;
+            } else if (sa && *sa) {
+                pl.linkName = Widen(sa);
+                pl.isSymlink = true;
+            } else {
+                const wchar_t* hw = archive_entry_hardlink_w(entry);
+                const char* ha = archive_entry_hardlink(entry);
+                pl.linkName = (hw && *hw) ? std::wstring(hw) : Widen(ha);
+                pl.isSymlink = false;
+            }
+            pendingLinks.push_back(std::move(pl));
             continue;
         }
         if (!isDir && !isReg && !singleStream) {
@@ -498,6 +628,16 @@ ExtractResult LibarchiveExtractor::extractToStaging(
                 Log(L"rejected unsafe entry path: " + entryName);
                 return Fail(ExtractStatus::Untrusted,
                             L"archive contains an unsafe path: " + entryName);
+            }
+            // Resolve case-only collisions / exact duplicates (design 07 §9).
+            // Directories merge; a duplicate file is last-wins (overwritten); a
+            // case-only colliding file is auto-renamed "name (1)".
+            InnerNameRegistry::Disposition disp;
+            rel = nameRegistry.Resolve(rel, isDir, disp);
+            if (disp == InnerNameRegistry::Disposition::Renamed) {
+                Log(L"case-only collision; renamed inner entry to: " + rel);
+            } else if (disp == InnerNameRegistry::Disposition::Duplicate) {
+                Log(L"duplicate inner path; last-wins: " + rel);
             }
         } else {
             // Single-stream: the output name is our own hint, but still pass it
@@ -612,6 +752,43 @@ ExtractResult LibarchiveExtractor::extractToStaging(
             } else {
                 progress.Emit(bytesWritten, 0, entryName);
             }
+
+            // --- Decompression-bomb sanity guard (design 07 §15) -----------
+            // Re-evaluate periodically (every ~32 MiB) so the cost is negligible.
+            // On a trip we always log; we ask the confirm hook once and cache the
+            // answer. Declining aborts with TooLarge; otherwise we continue and
+            // the disk-full path stays the final backstop.
+            if (bombContinue &&
+                bytesWritten - lastBombCheckBytes >= 32ull * 1024 * 1024) {
+                lastBombCheckBytes = bytesWritten;
+                const BombVerdict bv = EvaluateBombGuard(
+                    sourceSize, bytesWritten, FreeBytesOnVolume(stagingRoot));
+                if (bv.tripped) {
+                    if (!bombDecided) {
+                        bombDecided = true;
+                        Log(std::wstring(L"[bomb-guard] tripped (ratio=") +
+                            (bv.ratioTrip ? L"yes" : L"no") + L" space=" +
+                            (bv.spaceTrip ? L"yes" : L"no") + L") after " +
+                            std::to_wstring(bytesWritten) + L" bytes");
+                        if (callbacks.confirmLargeExtraction) {
+                            BombWarning bw;
+                            bw.archiveName = LeafName(sourcePath);
+                            bw.bytesWritten = bytesWritten;
+                            bw.compressedSize = sourceSize;
+                            bw.ratioTrip = bv.ratioTrip;
+                            bw.spaceTrip = bv.spaceTrip;
+                            bombContinue = callbacks.confirmLargeExtraction(bw);
+                        }
+                    }
+                    if (!bombContinue) {
+                        CloseHandle(h);
+                        DeleteFileW(fullExt.c_str());
+                        Log(L"[bomb-guard] aborted by user/policy; temp will be removed");
+                        return Fail(ExtractStatus::TooLarge,
+                                    L"aborted: archive looks like a decompression bomb");
+                    }
+                }
+            }
         }
 
         if (!writeOk) {
@@ -633,6 +810,45 @@ ExtractResult LibarchiveExtractor::extractToStaging(
         ++result.entriesWritten;
         progress.Emit(bytesWritten,
                       singleStream ? sourceSize : std::uint64_t{0}, entryName);
+    }
+
+    // --- Copy-policy links: materialize after the main pass ----------------
+    // Each link is replaced by a copy of its in-archive target's CONTENTS, which
+    // by now exist as a staged file. Self-referential / external (/etc/...,
+    // out-of-archive) or missing targets cannot be copied -> skip + log.
+    for (const PendingLink& pl : pendingLinks) {
+        if (callbacks.cancel && callbacks.cancel->IsCancelled()) {
+            return Fail(ExtractStatus::Cancelled, L"cancelled");
+        }
+        std::wstring targetRel;
+        if (!ResolveLinkTargetRel(pl, targetRel)) {
+            ++result.entriesSkipped;
+            Log(L"skipping link (external/unresolvable target): " + pl.destRel +
+                L" -> " + pl.linkName);
+            continue;
+        }
+        const std::wstring srcPath = JoinPath(stagingRoot, targetRel);
+        if (!IsRegularFileOnDisk(srcPath)) {
+            ++result.entriesSkipped;
+            Log(L"skipping link (target not a staged file): " + pl.destRel +
+                L" -> " + pl.linkName);
+            continue;
+        }
+        const std::wstring destPath = JoinPath(stagingRoot, pl.destRel);
+        const std::size_t sep = destPath.find_last_of(L'\\');
+        if (sep != std::wstring::npos) {
+            const std::wstring parent = destPath.substr(0, sep);
+            if (parent.size() > stagingRoot.size()) CreateDirsRecursive(parent);
+        }
+        if (CopyFileW(ToExtendedPath(srcPath).c_str(),
+                      ToExtendedPath(destPath).c_str(), /*bFailIfExists=*/FALSE)) {
+            ++result.entriesWritten;
+            ++result.linksCopied;
+            Log(L"copied link target: " + pl.destRel + L" <- " + targetRel);
+        } else {
+            ++result.entriesSkipped;
+            Log(L"skipping link (copy failed): " + pl.destRel);
+        }
     }
 
     // Final progress beat.

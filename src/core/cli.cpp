@@ -46,12 +46,17 @@ CommandLine ParseCommandLine(const std::vector<std::wstring>& args) {
             cl.showUsage = true;
             return cl;
         }
-        // First non-flag token is a path: the sample file for --set-default,
-        // otherwise the archive to extract.
+        // Non-flag token = a path. The first becomes archivePath (the sample
+        // file for --set-default, else the archive to extract); subsequent ones
+        // in Extract mode collect as extraPaths (one-process-per-path; design
+        // §16). For --set-default we only need the one sample file.
         if (!arg.empty() && arg.front() != L'-' && arg.front() != L'/') {
-            cl.archivePath = arg;
-            if (!wantSetDefault) cl.mode = Mode::Extract;
-            return cl;
+            if (cl.archivePath.empty()) {
+                cl.archivePath = arg;
+                if (!wantSetDefault) cl.mode = Mode::Extract;
+            } else if (cl.mode == Mode::Extract) {
+                cl.extraPaths.push_back(arg);
+            }
         }
     }
     return cl;  // Mode::None (or SetDefault with no sample file)

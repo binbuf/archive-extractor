@@ -25,7 +25,18 @@ enum class ExtractStatus {
     CorruptInput,  // libarchive read/decode error (truncated/corrupt)
     WriteFailed,   // a filesystem write/create error (disk full, denied, ...)
     NeedPassword,  // an encrypted entry was hit and no password was supplied
+    TooLarge,      // aborted by the decompression-bomb guard (declined to continue)
     Unsupported,   // the plan's backend is not libarchive / not handled here
+};
+
+// --- Symlink / hardlink policy (design 07 §6) -------------------------------
+
+// How the engine treats link entries (tar symlinks/hardlinks). The choice is
+// solicited ONCE per extraction (the first link encountered) and applied to all
+// links. v1 never creates real Windows symlinks/junctions.
+enum class LinkPolicy {
+    Skip,  // omit link entries entirely (log what was skipped) — the safe default
+    Copy,  // replace each link with a copy of its in-archive target's contents
 };
 
 // Summary of a finished (or aborted) extraction. `entriesWritten` counts
@@ -35,13 +46,28 @@ struct ExtractResult {
     ExtractStatus status = ExtractStatus::Ok;
     std::uint64_t entriesWritten = 0;
     std::uint64_t entriesSkipped = 0;
-    // Set when links (sym/hard) were present in the archive (detected + skipped
-    // for now; the copy/skip prompt is task 12).
+    // Set when links (sym/hard) were present in the archive. The one-time
+    // copy/skip prompt (LinkPolicy) decides whether they were materialized as
+    // copies or omitted; either way this is true so the UI/log can note it.
     bool hadLinks = false;
+    // Links materialized as copies of their target's contents (Copy policy).
+    std::uint64_t linksCopied = 0;
     // A short diagnostic for logging; never contains archive contents.
     std::wstring message;
 
     bool ok() const { return status == ExtractStatus::Ok; }
+};
+
+// --- Decompression-bomb warning (design 07 §15) -----------------------------
+
+// Handed to ExtractCallbacks::confirmLargeExtraction when the guard trips. The
+// engine has already logged the trip; the callback decides whether to continue.
+struct BombWarning {
+    std::wstring archiveName;        // archive leaf name, for the prompt
+    std::uint64_t bytesWritten = 0;  // uncompressed bytes staged so far
+    std::uint64_t compressedSize = 0;
+    bool ratioTrip = false;          // absurd expansion ratio
+    bool spaceTrip = false;          // approaching the disk's free space
 };
 
 // --- Progress ---------------------------------------------------------------
@@ -108,6 +134,18 @@ struct ExtractCallbacks {
     // NOT log or persist the password and should zero their own buffers.
     std::function<std::optional<std::wstring>(const PasswordPrompt&)>
         requestPassword;
+
+    // Link policy hook, invoked AT MOST ONCE — the first time a sym/hardlink
+    // entry is reached — to choose Copy vs Skip for the whole extraction. The
+    // engine caches the answer and applies it to every later link. When unset,
+    // links are skipped (the safe, no-privilege default).
+    std::function<LinkPolicy()> requestLinkPolicy;
+
+    // Decompression-bomb confirmation hook, invoked AT MOST ONCE if the bomb
+    // guard trips. Return true to continue extracting, false to abort with
+    // ExtractStatus::TooLarge. When unset, the engine logs the warning and
+    // continues (the disk-full path remains the final backstop).
+    std::function<bool(const BombWarning&)> confirmLargeExtraction;
 };
 
 // --- The backend-agnostic extraction interface ------------------------------

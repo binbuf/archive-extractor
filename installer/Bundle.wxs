@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Archive Extractor — EXE installer (WiX Burn bootstrapper, task 13).
+
+  Wraps the per-machine MSI in a single self-contained ArchiveExtractorSetup.exe
+  so users can install with a double-click (and so future prerequisites could be
+  chained here). The MSI remains the source of truth for what gets installed;
+  this only bootstraps it.
+
+  Build-time preprocessor variables (set via `wix build -d ...`):
+    Version   — bundle version (matches the MSI; from the git tag)
+    MsiSource — path to the built ArchiveExtractor.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="Archive Extractor"
+          Manufacturer="binbuf"
+          Version="$(var.Version)"
+          UpgradeCode="C3A1D9F4-2E6B-4A77-8F1C-5B0E7D9A4C12">
+
+    <BootstrapperApplication>
+      <!--
+        Standard themed UI. An empty LicenseUrl renders a plain Install/Close
+        page with no license gate (the app ships no separate EULA in v1).
+      -->
+      <bal:WixStandardBootstrapperApplication
+          Theme="hyperlinkLicense"
+          LicenseUrl=""
+          SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <MsiPackage SourceFile="$(var.MsiSource)" Vital="yes" Compressed="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

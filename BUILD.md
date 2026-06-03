@@ -66,6 +66,22 @@ build\x64-release\ArchiveExtractor.exe                        # no-op, exit code
 Because the exe is GUI-subsystem, `Log()` output appears in the attached console
 (when launched from a terminal) and in the debugger output window.
 
+## Installers (MSI + EXE)
+
+After a Release build, package both installers with WiX (the script installs the
+pinned WiX v5 CLI + bootstrapper extension on demand):
+
+```powershell
+.\scripts\build.ps1 -Release
+.\installer\build-installer.ps1 -Version 1.0.0
+# -> installer\out\ArchiveExtractor.msi          (per-machine x64 MSI)
+#    installer\out\ArchiveExtractorSetup.exe      (Burn bootstrapper .exe)
+```
+
+In CI, `.github/workflows/release.yml` builds the app, runs the tests, and
+produces + publishes both installers on a version tag (`vX.Y.Z`). See
+`installer/README.md` for how registration, upgrades, and uninstall work.
+
 ## Project layout
 
 | Path | Contents |

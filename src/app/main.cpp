@@ -1,4 +1,5 @@
 #include "archive_core/cli.h"
+#include "archive_core/detect.h"
 #include "archive_core/error_model.h"
 #include "archive_core/logging.h"
 #include "archive_core/paths.h"
@@ -64,6 +65,34 @@ void AttachParentConsole() {
     }
 }
 
+// One-process-per-path model (design 01 / §16): when a single invocation
+// batches multiple archives, launch a fresh instance of ourselves for each
+// extra path so each extraction gets its own progress window and working dir.
+// Best-effort: a failed spawn is logged and skipped, never fatal to the first.
+void SpawnExtraInstances(const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
+    wchar_t exe[MAX_PATH * 2];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
+    if (n == 0 || n >= ARRAYSIZE(exe)) return;
+    for (const std::wstring& path : paths) {
+        // Build a properly quoted command line: "exe" "path".
+        std::wstring cmd = L"\"" + std::wstring(exe, n) + L"\" \"" + path + L"\"";
+        std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+        buf.push_back(L'\0');
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, 0,
+                           nullptr, nullptr, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else {
+            ae::Log(std::format(L"[launch] could not spawn instance for: {} (err {})",
+                                LeafName(path), GetLastError()));
+        }
+    }
+}
+
 int RunExtract(const ae::CommandLine& cl, HINSTANCE hInstance) {
     if (!ae::PathExists(cl.archivePath)) {
         ae::Log(std::format(L"[error] code={} archive={}",
@@ -73,11 +102,21 @@ int RunExtract(const ae::CommandLine& cl, HINSTANCE hInstance) {
         return 2;
     }
     if (!ae::HasSupportedExtension(cl.archivePath)) {
-        ae::Log(std::format(L"[error] code={} archive={}",
-                            ae::ErrorCodeToken(ae::ErrorCode::Unsupported),
+        // The extension isn't one we recognize, but the user explicitly opened
+        // this file with us — sniff the content before refusing (design §16).
+        // DetectFile reads the header; a recognized signature (e.g. a real zip
+        // named .bin) lets us proceed, otherwise it's a friendly "unsupported".
+        const ae::PipelinePlan sniff = ae::DetectFile(cl.archivePath);
+        if (!sniff.supported()) {
+            ae::Log(std::format(L"[error] code={} archive={}",
+                                ae::ErrorCodeToken(ae::ErrorCode::Unsupported),
+                                LeafName(cl.archivePath)));
+            ShowError(ae::ErrorCode::Unsupported, cl.archivePath);
+            return 3;
+        }
+        ae::Log(std::format(L"[extract] unsupported extension accepted by content "
+                            L"sniff: {}",
                             LeafName(cl.archivePath)));
-        ShowError(ae::ErrorCode::Unsupported, cl.archivePath);
-        return 3;
     }
 
     const std::wstring workingDir = ae::ParentDirectory(cl.archivePath);
@@ -153,6 +192,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
             exitCode = ae::PromptSetAsDefault(cl.archivePath) ? 0 : 6;
             break;
         case ae::Mode::Extract:
+            // Batched multi-select: hand each extra path to its own process, then
+            // extract the first one in this process.
+            SpawnExtraInstances(cl.extraPaths);
             exitCode = RunExtract(cl, hInstance);
             break;
         case ae::Mode::None:

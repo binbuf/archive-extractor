@@ -4,6 +4,10 @@
 /build/
 /out/
 
+# Installer output (MSI / bundle exe produced by installer/build-installer.ps1)
+/installer/out/
+*.wixpdb
+
 # vcpkg manifest-mode install tree & buildtrees
 /vcpkg_installed/
 vcpkg-bootstrap.log

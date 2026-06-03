@@ -1,0 +1,105 @@
+name: release
+
+# Build the app and both installers (MSI + EXE) on a version tag, then publish
+# them as a GitHub Release. Trigger: pushing a tag like v1.2.3.
+on:
+  push:
+    tags:
+      - 'v*'
+  # Allow a manual dry run (builds artifacts but does not publish a release).
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # vcpkg builds its dependencies from source on the runner; cache the binaries
+  # in GitHub Actions cache so later runs are fast.
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # libarchive 3.7.x declares a pre-3.5 cmake_minimum_required that CMake 4.x
+  # rejects; this env var (honored by CMake 3.30+) restores the old policy
+  # floor for every sub-build, including the vcpkg ports.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A known-good CMake + Ninja (the preset uses the Ninja generator).
+      - uses: lukka/get-cmake@latest
+
+      # MSVC x64 compiler environment for the Ninja build.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Expose the GitHub Actions cache endpoint to vcpkg's x-gha provider.
+      - name: Enable vcpkg GHA binary cache
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Point VCPKG_ROOT at the preinstalled vcpkg
+        shell: pwsh
+        run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+
+      - name: Derive version from the tag
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          $v = $ref -replace '^v', ''
+          if ($v -notmatch '^\d+\.\d+\.\d+') { $v = '0.0.0' }  # dry-run fallback
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version = $v"
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset x64-release
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset x64-release
+
+      # Generate the test corpus (pure-Python deps are pip-installed best-effort),
+      # then run the suite. RAR-only tests self-skip without WinRAR.
+      - name: Generate test assets
+        shell: pwsh
+        run: python scripts/gen-test-assets.py
+
+      - name: Test
+        shell: pwsh
+        run: ctest --preset x64-release --output-on-failure
+
+      - name: Build installers (MSI + EXE bundle)
+        shell: pwsh
+        run: ./installer/build-installer.ps1 -Version "${{ steps.ver.outputs.version }}"
+
+      - name: Stage release artifacts
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item installer/out/ArchiveExtractor.msi      "dist/ArchiveExtractor-$v.msi"
+          Copy-Item installer/out/ArchiveExtractorSetup.exe "dist/ArchiveExtractorSetup-$v.exe"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: dist/*
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

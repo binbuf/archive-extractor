@@ -6,8 +6,9 @@
 
 **A macOS-style, performant archive extractor for Windows 11/10.**
 
-<img src="docs/screenshots/app.jpg" width="380" alt="Extraction progress dialog">
 <img src="docs/screenshots/explorer.jpg" width="380" alt="Extracted files revealed in Explorer">
+<br />
+<img src="docs/screenshots/app.jpg" width="380" alt="Extraction progress dialog">
 
 </div>
 
