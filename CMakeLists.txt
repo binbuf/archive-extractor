@@ -116,6 +116,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/app/app.rc.in
 add_executable(ArchiveExtractor WIN32
   src/app/main.cpp
   src/app/progress_dialog.cpp
+  src/app/password_dialog.cpp
   src/app/error_dialog.cpp
   src/app/shell_reveal.cpp
   src/app/app.manifest
@@ -147,6 +148,7 @@ add_executable(archive_core_tests
   tests/test_detect.cpp
   tests/test_extract.cpp
   tests/test_sevenzip.cpp
+  tests/test_passwords.cpp
   tests/test_layout.cpp
   tests/test_error_model.cpp
   tests/test_registration.cpp

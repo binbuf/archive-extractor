@@ -70,6 +70,22 @@ class CancellationToken {
     std::atomic<bool> flag_{false};
 };
 
+// --- Password prompting ------------------------------------------------------
+
+// Maximum number of password attempts the engine will solicit for one archive
+// before aborting the whole extraction (design 07 §1: "Cap retries (e.g. 3)").
+// After the cap is exhausted the engine fails with ExtractStatus::NeedPassword;
+// a cancel at the prompt fails with ExtractStatus::Cancelled.
+inline constexpr unsigned kMaxPasswordAttempts = 3;
+
+// Context handed to ExtractCallbacks::requestPassword for one prompt. `attempt`
+// is 0 for the first prompt and increments on each wrong-password retry, so the
+// UI can show the inline "Incorrect password" message (attempt >= 1).
+struct PasswordPrompt {
+    std::wstring archiveName;  // archive leaf name, for the prompt text/title
+    unsigned attempt = 0;      // 0 = first prompt; >= 1 => a prior try was wrong
+};
+
 // --- Callbacks --------------------------------------------------------------
 
 // Callbacks the engine invokes on the WORKER thread. All are optional. The UI
@@ -82,10 +98,16 @@ struct ExtractCallbacks {
     // Cancellation token, polled by the engine. May be null (no cancellation).
     CancellationToken* cancel = nullptr;
 
-    // Password request hook. Returns the passphrase to try, or nullopt for
-    // "no password". For task 03 callers pass nothing (or a stub returning
-    // nullopt); the real prompt is task 10.
-    std::function<std::optional<std::wstring>()> requestPassword;
+    // Password request hook, invoked when the engine needs a passphrase. Returns
+    // the password to try, or nullopt to cancel the whole extraction. The engine
+    // owns the retry/cap policy: it re-invokes this with an incremented
+    // `attempt` on a wrong password, up to kMaxPasswordAttempts. When unset, an
+    // encrypted archive fails with ExtractStatus::NeedPassword. The accepted
+    // password is cached for the lifetime of the single extraction (never
+    // re-prompted per file, never reused across processes). Implementations MUST
+    // NOT log or persist the password and should zero their own buffers.
+    std::function<std::optional<std::wstring>(const PasswordPrompt&)>
+        requestPassword;
 };
 
 // --- The backend-agnostic extraction interface ------------------------------
@@ -119,7 +141,10 @@ class LibarchiveExtractor final : public IExtractor {
 // The bit7z/7z.dll-backed implementation (task 09). Covers the cases libarchive
 // cannot: encrypted 7z (AES-256, including header-encrypted) and ALL RAR/RAR5
 // (better fidelity than libarchive's clean-room RAR reader), plus the matching
-// multi-volume chains. The runtime `7z.dll` is loaded ON DEMAND the first time
+// multi-volume chains. Also handles WinZip-AES zips, which the bundled
+// libarchive build cannot decrypt (no AES cipher) — ResolveBackend routes those
+// here while traditional ZipCrypto stays on libarchive. The runtime `7z.dll`
+// is loaded ON DEMAND the first time
 // this backend actually runs (the `Bit7zLibrary` is constructed lazily inside
 // extractToStaging), so plain-zip/libarchive paths never touch 7z.dll and cold
 // start is unaffected. Progress/cancel/password semantics mirror

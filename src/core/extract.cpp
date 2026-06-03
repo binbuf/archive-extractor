@@ -235,6 +235,73 @@ std::wstring Widen(const char* s) {
     return out;
 }
 
+// Leaf name (basename with extension) of a path, for the password prompt /
+// diagnostics. Never logs contents.
+std::wstring LeafName(std::wstring_view path) {
+    std::wstring p = NormalizeSeparators(path);
+    const std::size_t sep = p.find_last_of(L'\\');
+    return sep == std::wstring::npos ? p : p.substr(sep + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Passphrase callback bridge (encrypted zip). libarchive invokes the registered
+// callback whenever it needs a passphrase, and RE-INVOKES it when the previous
+// one failed to decrypt (see __archive_read_next_passphrase). We drive the
+// engine's retry/cap/cancel policy from inside the trampoline: each call
+// solicits one password from ExtractCallbacks::requestPassword with an
+// incrementing attempt index; returning nullptr ends the attempts (libarchive
+// then reports ARCHIVE_FAILED "Incorrect passphrase"). The UTF-8 buffer handed
+// back is zeroed when the context is destroyed.
+// ---------------------------------------------------------------------------
+struct PassphraseCtx {
+    const ExtractCallbacks* cb = nullptr;
+    std::wstring archiveName;
+    unsigned attempt = 0;
+    bool cancelled = false;   // user cancelled at the prompt
+    bool exhausted = false;   // hit the retry cap with all-wrong passwords
+    std::string utf8;         // last passphrase handed to libarchive (zeroed)
+
+    ~PassphraseCtx() {
+        if (!utf8.empty()) {
+            SecureZeroMemory(utf8.data(), utf8.size());
+        }
+    }
+};
+
+const char* PassphraseTrampoline(struct archive* /*a*/, void* client_data) {
+    auto* ctx = static_cast<PassphraseCtx*>(client_data);
+    if (!ctx || !ctx->cb || !ctx->cb->requestPassword) return nullptr;
+    // Cap: after kMaxPasswordAttempts solicitations, stop (clean abort).
+    if (ctx->attempt >= kMaxPasswordAttempts) {
+        ctx->exhausted = true;
+        return nullptr;
+    }
+    PasswordPrompt prompt;
+    prompt.archiveName = ctx->archiveName;
+    prompt.attempt = ctx->attempt;
+    std::optional<std::wstring> pw = ctx->cb->requestPassword(prompt);
+    ++ctx->attempt;
+    if (!pw) {
+        ctx->cancelled = true;
+        return nullptr;
+    }
+    // Convert to UTF-8 for libarchive; keep it alive in the context (libarchive
+    // copies it into its own passphrase list).
+    if (!ctx->utf8.empty()) SecureZeroMemory(ctx->utf8.data(), ctx->utf8.size());
+    const int n = WideCharToMultiByte(CP_UTF8, 0, pw->c_str(), -1, nullptr, 0,
+                                      nullptr, nullptr);
+    if (n <= 0) {
+        ctx->utf8.clear();
+        return "";  // empty passphrase: will simply fail to decrypt
+    }
+    ctx->utf8.assign(static_cast<std::size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, pw->c_str(), -1, ctx->utf8.data(), n, nullptr,
+                        nullptr);
+    // Zero the wide copy we no longer need.
+    if (!pw->empty()) SecureZeroMemory(pw->data(), pw->size() * sizeof(wchar_t));
+    return ctx->utf8.c_str();
+}
+
 // Throttled progress emitter.
 class ProgressThrottle {
    public:
@@ -292,6 +359,12 @@ ExtractResult LibarchiveExtractor::extractToStaging(
                     L"plan backend is not libarchive");
     }
 
+    // The passphrase context must outlive the archive reader (libarchive holds
+    // a pointer to it via the registered callback), so declare it first.
+    PassphraseCtx pctx;
+    pctx.cb = &callbacks;
+    pctx.archiveName = LeafName(sourcePath);
+
     ArchiveReader reader;
     reader.a = archive_read_new();
     if (!reader.a) {
@@ -314,18 +387,13 @@ ExtractResult LibarchiveExtractor::extractToStaging(
     // (libarchive reads bit 11 itself; hdrcharset steers the fallback.)
     archive_read_set_option(a, "zip", "hdrcharset", "UTF-8");
 
-    // Password hook (task 10 supplies a real prompt; here it returns nullopt).
+    // Password hook: register the passphrase callback so libarchive solicits a
+    // password (with retry/cap/cancel) the moment it reaches an encrypted entry.
+    // For encrypted zip this is the whole flow; the callback caches the accepted
+    // passphrase for every later entry. When no requestPassword is supplied an
+    // encrypted entry is surfaced as NeedPassword below.
     if (callbacks.requestPassword) {
-        if (auto pw = callbacks.requestPassword()) {
-            const int n = WideCharToMultiByte(CP_UTF8, 0, pw->c_str(), -1,
-                                               nullptr, 0, nullptr, nullptr);
-            if (n > 0) {
-                std::string utf8(static_cast<std::size_t>(n - 1), '\0');
-                WideCharToMultiByte(CP_UTF8, 0, pw->c_str(), -1, utf8.data(), n,
-                                    nullptr, nullptr);
-                archive_read_add_passphrase(a, utf8.c_str());
-            }
-        }
+        archive_read_set_passphrase_callback(a, &pctx, &PassphraseTrampoline);
     }
 
     const std::wstring src = ToExtendedPath(sourcePath);
@@ -413,6 +481,16 @@ ExtractResult LibarchiveExtractor::extractToStaging(
             continue;
         }
 
+        // Encrypted entry with no way to ask for a password: surface
+        // NeedPassword cleanly before creating any output file. (With a
+        // requestPassword callback registered, libarchive solicits the password
+        // lazily via the passphrase trampoline when it reads the data.)
+        if (isReg && !callbacks.requestPassword &&
+            archive_entry_is_encrypted(entry)) {
+            return Fail(ExtractStatus::NeedPassword,
+                        L"archive is encrypted; a password is required");
+        }
+
         // --- Path safety (zip-slip) ----------------------------------------
         std::wstring rel;
         if (!singleStream) {
@@ -484,6 +562,22 @@ ExtractResult LibarchiveExtractor::extractToStaging(
             if (rd < ARCHIVE_WARN) {
                 CloseHandle(h);
                 DeleteFileW(fullExt.c_str());
+                // A decryption failure manifests here once the passphrase
+                // trampoline has stopped supplying passwords. Distinguish the
+                // password outcomes from a genuine corrupt-stream error so the
+                // flow can clean up and report precisely.
+                if (pctx.cancelled) {
+                    return Fail(ExtractStatus::Cancelled, L"cancelled at password prompt");
+                }
+                if (pctx.exhausted) {
+                    return Fail(ExtractStatus::NeedPassword,
+                                L"incorrect password (retry cap reached)");
+                }
+                if (archive_entry_is_encrypted(entry)) {
+                    return Fail(ExtractStatus::NeedPassword,
+                                L"archive is encrypted; a password is required: " +
+                                    Widen(ErrText(a)));
+                }
                 return Fail(ExtractStatus::CorruptInput,
                             L"read error in entry " + rel + L": " +
                                 Widen(ErrText(a)));

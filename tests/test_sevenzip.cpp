@@ -107,7 +107,8 @@ ExtractResult Extract7z(const PipelinePlan& plan, const std::wstring& src,
     ExtractCallbacks cb;
     std::wstring pw = password ? password : L"";
     if (password) {
-        cb.requestPassword = [pw]() -> std::optional<std::wstring> {
+        cb.requestPassword =
+            [pw](const ae::PasswordPrompt&) -> std::optional<std::wstring> {
             return pw;
         };
     }

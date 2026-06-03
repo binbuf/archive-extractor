@@ -6,6 +6,7 @@
 #include "archive_core/layout.h"
 #include "archive_core/logging.h"
 #include "archive_core/paths.h"
+#include "password_dialog.h"
 #include "shell_reveal.h"
 
 #include <atomic>
@@ -32,6 +33,9 @@ namespace {
 constexpr UINT WM_APP_PROGRESS = WM_APP + 1;
 // Flow finished. lParam = new WorkerResult* (heap, UI thread deletes).
 constexpr UINT WM_APP_DONE = WM_APP + 2;
+// Worker needs a password. The worker fills DialogState::pw* and blocks on
+// pwEvent; the UI thread shows the modal prompt and signals the event back.
+constexpr UINT WM_APP_PASSWORD = WM_APP + 3;
 
 // Flash-suppression threshold. Extractions that finish faster than this never
 // show the window, avoiding a flicker on trivial archives. Chosen at 200 ms per
@@ -73,6 +77,7 @@ struct DialogState {
     HWND hBar = nullptr;
     HWND hCancel = nullptr;
     HFONT hFont = nullptr;
+    HINSTANCE hInst = nullptr;  // module instance (for the password dialog class)
 
     CancellationToken cancel;
     std::thread worker;
@@ -81,6 +86,17 @@ struct DialogState {
     bool finished = false;    // WM_APP_DONE received
     bool determinate = false;  // a progress sample with total>0 arrived
     bool cancelRequested = false;
+
+    // --- Password prompt handoff (worker blocks; UI answers) ---------------
+    // The worker sets pwAttempt before posting WM_APP_PASSWORD and waits on
+    // pwEvent; the UI thread shows the modal prompt, writes pwCancelled/pwResult,
+    // then SetEvent(pwEvent). Synchronization is via the post + event (no lock
+    // needed: writes happen-before the post / the SetEvent).
+    HANDLE pwEvent = nullptr;
+    unsigned pwAttempt = 0;
+    bool pwCancelled = false;
+    std::wstring pwResult;
+    bool passwordResolved = false;  // a password was accepted at least once
 
     UINT dpi = 96;
     DialogResult result;  // filled on completion; returned by the run loop
@@ -289,8 +305,28 @@ void WorkerFlow(DialogState* st) {
         PostMessageW(hwnd, WM_APP_PROGRESS, 0,
                      reinterpret_cast<LPARAM>(new Progress(p)));
     };
-    // Password hook is task 10 — pass nothing (engine treats null as "no
-    // password" and surfaces NeedPassword if it hits an encrypted entry).
+    // Password hook: block the worker on a synchronized request to the UI
+    // thread. We post WM_APP_PASSWORD and wait on pwEvent; the UI thread shows
+    // the modal prompt and signals back with the result. The engine owns the
+    // retry/cap policy and re-invokes this with an incremented attempt on a
+    // wrong password. Returning nullopt (the user cancelled) aborts cleanly.
+    cb.requestPassword =
+        [st](const PasswordPrompt& prompt) -> std::optional<std::wstring> {
+        st->pwAttempt = prompt.attempt;
+        st->pwCancelled = false;
+        st->pwResult.clear();
+        PostMessageW(st->hwnd, WM_APP_PASSWORD, 0, 0);
+        WaitForSingleObject(st->pwEvent, INFINITE);
+        if (st->pwCancelled) return std::nullopt;
+        std::wstring pw = st->pwResult;
+        // Don't leave the password lingering in the shared handoff buffer.
+        if (!st->pwResult.empty()) {
+            SecureZeroMemory(st->pwResult.data(),
+                             st->pwResult.size() * sizeof(wchar_t));
+            st->pwResult.clear();
+        }
+        return pw;
+    };
 
     LibarchiveExtractor libExtractor;
     SevenZipExtractor sevenZipExtractor;
@@ -364,6 +400,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               reinterpret_cast<LONG_PTR>(st));
             st->hwnd = hwnd;
             st->dpi = GetDpiForWindow(hwnd);
+            st->hInst = cs->hInstance;
 
             HINSTANCE inst = cs->hInstance;
             st->hLabel = CreateWindowExW(
@@ -417,6 +454,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 // total==0 -> stay on marquee (indeterminate); nothing to do.
             }
+            return 0;
+        }
+
+        case WM_APP_PASSWORD: {
+            // Worker is blocked waiting for a password. Show the modal prompt on
+            // the UI thread and signal the result back via pwEvent.
+            if (st && !st->finished) {
+                // Encrypted-header timing: keep the progress window hidden until
+                // the first password is accepted, so the prompt is the first UI
+                // the user sees. Cancel the deferred-show timer; if progress is
+                // already visible (a later per-entry re-prompt), leave it.
+                if (!st->passwordResolved && !st->shown) {
+                    KillTimer(hwnd, kShowTimerId);
+                }
+                PasswordPromptResult pr = ShowPasswordDialog(
+                    st->fileName, st->pwAttempt, hwnd, st->hInst);
+                st->pwCancelled = pr.cancelled;
+                st->pwResult = pr.password;
+                if (!pr.password.empty()) {
+                    SecureZeroMemory(pr.password.data(),
+                                     pr.password.size() * sizeof(wchar_t));
+                }
+                if (!pr.cancelled) {
+                    st->passwordResolved = true;
+                    // Resume the normal flash-suppressed reveal of progress.
+                    if (!st->shown) {
+                        SetTimer(hwnd, kShowTimerId, kFlashSuppressMs, nullptr);
+                    }
+                }
+            } else {
+                // Already finished/closing: release the worker as a cancel.
+                st->pwCancelled = true;
+            }
+            if (st) SetEvent(st->pwEvent);
             return 0;
         }
 
@@ -512,6 +583,8 @@ DialogResult RunExtractionDialog(const std::wstring& archivePath,
     DialogState st;
     st.archivePath = archivePath;
     st.fileName = PathFindFileNameW(archivePath.c_str());
+    // Auto-reset event for the worker<->UI password handoff.
+    st.pwEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
     // No min/max box; a thin tool-window-ish frame. WS_EX_DLGMODALFRAME for a
     // clean dialog border; not actually modal (own message loop, modeless).
@@ -521,6 +594,7 @@ DialogResult RunExtractionDialog(const std::wstring& archivePath,
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
         CW_USEDEFAULT, CW_USEDEFAULT, nullptr, nullptr, inst, &st);
     if (!hwnd) {
+        if (st.pwEvent) CloseHandle(st.pwEvent);
         DialogResult r;
         r.outcome = DialogOutcome::Failed;
         r.error = MakeError(ErrorCode::Internal, st.fileName);
@@ -545,6 +619,8 @@ DialogResult RunExtractionDialog(const std::wstring& archivePath,
     // The window is gone; join the worker (it has already posted DONE and
     // returned, or is about to). This guarantees no dangling reference to `st`.
     if (st.worker.joinable()) st.worker.join();
+
+    if (st.pwEvent) CloseHandle(st.pwEvent);
 
     return st.result;
 }
